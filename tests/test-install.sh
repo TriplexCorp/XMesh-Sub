@@ -11,6 +11,14 @@ out=$(bash install.sh --panel https://panel.example.org --domain sub.example.org
 grep -Fq 'path_regexp ^(/s|/sub|/portal)/[0-9a-f]{64}$' <<< "$out"
 grep -Fq 'reverse_proxy https://panel.example.org' <<< "$out"
 grep -Fq 'header_up -Cookie' <<< "$out"
+# A real HTML portal needs its exact CSS/JS files; all other paths remain 404.
+grep -Fq 'path /subscription-studio.css /subscription-surface.css /subscription-public.css /qr-code.js /subscription-experience.js /subscription-traffic.js /subscription-portal.js' <<< "$out"
+grep -Fq 'handle @portal_assets {' <<< "$out"
+# Ensure only one explicit public static allowlist, not a blanket /js/* or /*.
+if grep -Eq 'path /\*|path /js/\*|path /styles/\*' <<< "$out"; then
+  echo 'ERROR: portal static allowlist is too broad' >&2
+  exit 1
+fi
 grep -Fq 'read_only: true' <<< "$out"
 grep -Fq 'Validation successful' <<< "$out"
 # Nexus mounts its public readiness route under /api/v1. A bare /health/ready is 404.

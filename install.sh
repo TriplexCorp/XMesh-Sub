@@ -61,6 +61,20 @@ $DOMAIN {
       header_up -Cookie
     }
   }
+  # Exact public portal assets referenced by Nexus subscription_template.html.
+  # Never forward the panel's admin bundle, secrets or arbitrary paths.
+  @portal_assets {
+    method GET HEAD
+    path /subscription-studio.css /subscription-surface.css /subscription-public.css /qr-code.js /subscription-experience.js /subscription-traffic.js /subscription-portal.js
+  }
+  handle @portal_assets {
+    reverse_proxy https://$PANEL_HOST {
+      header_up Host $PANEL_HOST
+      header_up -Authorization
+      header_up -Cookie
+    }
+  }
+
   handle /healthz {
     respond "ok" 200
   }
