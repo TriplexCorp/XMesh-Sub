@@ -23,6 +23,8 @@ fail_expected --panel https://127.0.0.1 --domain sub.example.org --path /s
 fail_expected --panel https://panel.example.org --domain panel.example.org --path /s
 fail_expected --panel https://panel.example.org --domain 'evil;curl bad' --path /s
 fail_expected --panel https://panel.example.org --domain sub.example.org --path /api/admin
+# Literal injection payload must not expand in the test shell.
+# shellcheck disable=SC2016
 fail_expected --panel https://panel.example.org --domain sub.example.org --path '/s/$(whoami)'
 fail_expected --panel https://panel.example.org --domain sub.example.org --path /s/../login
 fail_expected --panel https://panel.example.org --domain sub.example.org --path /s/
