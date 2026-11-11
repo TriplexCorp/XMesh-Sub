@@ -39,8 +39,13 @@ Upgrade:
 ## Phase 1 implementation and guarantees
 
 **This is an isolated edge gateway, not yet an independent subscription generator.**
-The gateway handles only GET/HEAD for the configured subscription path plus /sub/{token}
+The gateway handles GET/HEAD for the configured subscription path plus /sub/{token}
 and /portal/{token}, where the token must contain exactly 64 lowercase hex characters.
+It also forwards only the seven **exact public portal CSS/JS asset filenames** required
+by Nexus's server-rendered subscription template (never arbitrary `/js`, `/styles`,
+control API endpoints or other static files). Without these assets the portal HTML
+appears as an unstyled page. To repair an existing installation, rerun the same
+installer command to regenerate `/opt/xmesh-sub/Caddyfile` and restart Caddy.
 Unrelated requests return 404 (including all administration and API endpoints).
 Requests are passed through verified HTTPS to Nexus. Nexus still owns tokens, revocation,
 expiration, quota enforcement, portal rendering, and client formats.
