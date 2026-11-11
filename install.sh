@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 umask 077
 ROOT=/opt/xmesh-sub
-PANEL='' DOMAIN='' SUB_PATH='' EMAIL='' DRY_RUN=0
+PANEL='' DOMAIN='' SUB_PATH='' EMAIL='' DRY_RUN=0 ENROLL_TOKEN='' SKIP_MANAGER_RESTART=0
 die() { printf 'XMesh Sub: ERROR: %s\n' "$*" >&2; exit 1; }
 info() { printf 'XMesh Sub: %s\n' "$*"; }
 usage() {
@@ -19,6 +19,11 @@ while (($#)); do
       (($# >= 2)) || die "Missing value for $1"
       case "$1" in --panel) PANEL=$2;; --domain) DOMAIN=$2;; --path) SUB_PATH=$2;; --email) EMAIL=$2;; esac
       shift 2;;
+    --enroll-token)
+      (($# >= 2)) || die "Missing enrollment token"
+      ENROLL_TOKEN=$2
+      shift 2;;
+    --skip-manager-restart) SKIP_MANAGER_RESTART=1; shift;;
     --dry-run) DRY_RUN=1; shift;;
     -h|--help) usage; exit 0;;
     *) die "Unknown argument: $1";;
@@ -44,6 +49,9 @@ valid_host "$PANEL_HOST" || die "Panel must be an HTTPS hostname without port, p
 case "$SUB_PATH" in /api|/api/*|/login|/login/*|/dashboard|/dashboard/*) die "Subscription path collides with admin routes";; esac
 if [[ -n "$EMAIL" ]]; then
   [[ "$EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || die "Invalid certificate email"
+fi
+if [[ -n "$ENROLL_TOKEN" ]]; then
+  [[ "$ENROLL_TOKEN" =~ ^[0-9a-f]{64}$ ]] || die "Invalid or expired enrollment token format"
 fi
 
 render_caddyfile() {
@@ -126,6 +134,9 @@ fi
 [[ "$ID" == ubuntu && ( "$VERSION_ID" == "22.04" || "$VERSION_ID" == "24.04" ) ]] ||
   die "Only Ubuntu 22.04/24.04 LTS supported"
 command -v curl >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates; }
+if [[ -n "$ENROLL_TOKEN" || -f "$ROOT/manager.json" ]]; then
+  command -v python3 >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3; }
+fi
 getent ahosts "$DOMAIN" >/dev/null || die "Subscription DNS does not resolve; create A/AAAA record"
 curl -fsS --connect-timeout 7 --max-time 15 --output /dev/null "$PANEL/api/v1/health/ready" ||
   die "Nexus readiness check failed at $PANEL/api/v1/health/ready; verify HTTPS, /api/v1 proxy routing and Nexus database/Redis readiness"
@@ -156,6 +167,14 @@ trap 'rm -rf "$temp"' EXIT
 render_caddyfile >"$temp/Caddyfile"
 render_compose >"$temp/compose.yaml"
 chmod 600 "$temp/Caddyfile" "$temp/compose.yaml"
+if [[ -n "$ENROLL_TOKEN" || -f "$ROOT/manager.json" ]]; then
+  # The manager is outbound-only. Obtain the audited source before consuming
+  # a short-lived one-time enrollment code.
+  curl -fsSL --connect-timeout 8 --max-time 35 \
+    https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/manager.py -o "$temp/manager.py" ||
+    die "Could not download XMesh Sub manager"
+  python3 -m py_compile "$temp/manager.py" || die "Manager failed syntax validation"
+fi
 docker run --rm -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ||
   die "Gateway configuration invalid, existing deployment unchanged"
 [[ ! -f "$ROOT/Caddyfile" ]] || cp -p "$ROOT/Caddyfile" "$ROOT/Caddyfile.previous"
@@ -164,7 +183,65 @@ install -m 600 "$temp/compose.yaml" "$ROOT/compose.yaml"
 cd "$ROOT"
 docker compose pull
 docker compose up -d --remove-orphans
+if [[ -n "$ENROLL_TOKEN" ]]; then
+  # The one-time credential is exchanged for a long-lived service token over
+  # verified TLS. Neither credential is printed in output. Only root may read it.
+  XMESH_ENROLL_TOKEN="$ENROLL_TOKEN" python3 - "$PANEL" "$DOMAIN" "$SUB_PATH" "$temp/manager.json" <<'PY'
+import json, os, re, ssl, sys, urllib.request
+panel, domain, sub_path, path = sys.argv[1:]
+request = urllib.request.Request(
+  panel + "/api/v1/sub-server/claim",
+  data=json.dumps({"enrollmentToken": os.environ["XMESH_ENROLL_TOKEN"], "domain": domain}).encode(),
+  headers={"Content-Type": "application/json"}, method="POST"
+)
+with urllib.request.urlopen(request, timeout=20, context=ssl.create_default_context()) as response:
+  body = response.read(4096)
+token = json.loads(body)["agentToken"]
+if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64}", token):
+  raise SystemExit("Nexus returned an invalid manager credential")
+with open(path, "w", encoding="utf-8") as out:
+  json.dump({"panel": panel, "domain": domain, "path": sub_path, "agentToken": token}, out)
+os.chmod(path, 0o600)
+PY
+  chmod 600 "$temp/manager.json"
+fi
+if [[ -s "$temp/manager.py" ]]; then
+  install -m 700 "$temp/manager.py" "$ROOT/manager.py"
+  if [[ -s "$temp/manager.json" ]]; then
+    install -m 600 "$temp/manager.json" "$ROOT/manager.json"
+  fi
+  # Fixed systemd service, no inbound ports, credentials live only in a
+  # root-owned JSON file; no Docker socket exposed to public containers.
+  cat >"$temp/xmesh-sub-manager.service" <<'UNIT'
+[Unit]
+Description=XMesh Sub Outbound Management Agent
+After=network-online.target docker.service
+Wants=network-online.target
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/xmesh-sub/manager.py
+WorkingDirectory=/opt/xmesh-sub
+Restart=always
+RestartSec=15
+NoNewPrivileges=true
+UMask=0077
+[Install]
+WantedBy=multi-user.target
+UNIT
+  install -m 644 "$temp/xmesh-sub-manager.service" /etc/systemd/system/xmesh-sub-manager.service
+  systemctl daemon-reload
+  systemctl enable xmesh-sub-manager.service >/dev/null
+  if ((SKIP_MANAGER_RESTART == 0)); then
+    systemctl restart xmesh-sub-manager.service
+  fi
+fi
+curl -fsSL --connect-timeout 8 --max-time 20 \
+  https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/VERSION -o "$temp/VERSION" ||
+  die "Could not download XMesh Sub version"
+install -m 644 "$temp/VERSION" "$ROOT/VERSION"
 info "Started. Check HTTPS health: https://$DOMAIN/healthz"
 info "Status: cd $ROOT && sudo docker compose ps"
 info "Upgrade: cd $ROOT && sudo docker compose pull && sudo docker compose up -d"
 info "Do not move existing users until a canary feed is verified."
+if [[ -n "$ENROLL_TOKEN" ]]; then info "Management agent enrolled. Check its status in Nexus Subscription Studio."; fi
