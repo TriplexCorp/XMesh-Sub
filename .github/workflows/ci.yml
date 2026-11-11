@@ -16,6 +16,10 @@ jobs:
           shellcheck -s bash install.sh tests/test-install.sh
       - name: Installer argument tests
         run: bash tests/test-install.sh
+      - name: Outbound management agent tests
+        run: |
+          python3 -m py_compile manager.py
+          python3 tests/test-manager.py
       - name: Validate rendered Caddy configuration
         run: |
           bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --dry-run | sed -n '/^# Caddyfile$/,/^# compose.yaml$/p' | sed '1d;$d' > Caddyfile

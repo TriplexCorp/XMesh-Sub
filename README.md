@@ -59,3 +59,33 @@ Changing the actual hostname in issued links can require clients to re-import th
 Future work can add pairing, fleet reporting, and independent subscription rendering.
 
 See [SECURITY.md](SECURITY.md).
+
+## Managed updates (optional, one-time enrollment)
+
+The public HTTPS gateway can run without remote administration. To enable
+**Update XMesh Sub** in Subscription Studio, click **Connect management** as
+an owner. The panel issues a short-lived, single-use enrollment code, then
+shows an installer command containing `--enroll-token`. Run the command on the
+existing Sub VPS; the installer validates HTTPS, exchanges the enrollment code
+for a service token over HTTPS and installs a systemd outbound-only agent.
+The long-lived token is stored in `/opt/xmesh-sub/manager.json` with mode 0600.
+It is **not** returned to panel browsers after claiming, and the short-lived
+code cannot be replayed. Revoking/re-enrolling rotates the service credential.
+
+The agent uses outbound requests to `https://<panel>/api/v1/sub-server/agent/poll`
+and `.../report` every 20 seconds. The Nexus owner can enqueue **one fixed
+update action**; the agent will fetch the reviewed official XMesh-Sub installer
+from the project's main branch and rerun it with its existing domain and path.
+It never accepts URLs, shell commands, or other executable arguments from
+Nexus. **There is no inbound management port or Docker socket mounted into
+Caddy.** To inspect the manager on the VPS:
+
+    sudo systemctl status xmesh-sub-manager
+    sudo journalctl -u xmesh-sub-manager -n 50 --no-pager
+
+The agent and update code execute as root. Protect the VPS and its GitHub supply
+chain, use TLS, and review changes before issuing remote updates. Updates may
+briefly interrupt the public gateway. If Nexus is unreachable, the agent cannot
+receive update tasks, but Caddy keeps serving subscription requests when Nexus
+connectivity returns. For current versions, enrollment and management target a
+**single** XMesh Sub server per Nexus installation, not a multi-server fleet.
