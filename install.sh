@@ -113,8 +113,8 @@ fi
   die "Only Ubuntu 22.04/24.04 LTS supported"
 command -v curl >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates; }
 getent ahosts "$DOMAIN" >/dev/null || die "Subscription DNS does not resolve; create A/AAAA record"
-curl -fsS --connect-timeout 7 --max-time 15 --output /dev/null "$PANEL/health/ready" ||
-  die "Nexus is not reachable via verified HTTPS; fix panel connectivity first"
+curl -fsS --connect-timeout 7 --max-time 15 --output /dev/null "$PANEL/api/v1/health/ready" ||
+  die "Nexus readiness check failed at $PANEL/api/v1/health/ready; verify HTTPS, /api/v1 proxy routing and Nexus database/Redis readiness"
 if [[ ! -e "$ROOT/compose.yaml" ]] && command -v ss >/dev/null; then
   for port in 80 443; do
     if ss -H -ltn "( sport = :$port )" | grep -q .; then

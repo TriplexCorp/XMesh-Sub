@@ -13,6 +13,15 @@ grep -Fq 'reverse_proxy https://panel.example.org' <<< "$out"
 grep -Fq 'header_up -Cookie' <<< "$out"
 grep -Fq 'read_only: true' <<< "$out"
 grep -Fq 'Validation successful' <<< "$out"
+# Nexus mounts its public readiness route under /api/v1. A bare /health/ready is 404.
+# Literal source-code signatures (not intended for shell expansion).
+# shellcheck disable=SC2016
+grep -Fq '"$PANEL/api/v1/health/ready"' install.sh
+# shellcheck disable=SC2016
+if grep -Fq '"$PANEL/health/ready"' install.sh; then
+  echo 'ERROR: installer uses the old, unmounted Nexus readiness path' >&2
+  exit 1
+fi
 out=$(bash install.sh --panel https://panel.example.org --domain sub.example.org --path /example/vpn --email ops@example.org --dry-run)
 grep -Fq 'path_regexp ^(/example/vpn|/sub|/portal)/[0-9a-f]{64}$' <<< "$out"
 grep -Fq 'email ops@example.org' <<< "$out"
