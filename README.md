@@ -16,6 +16,13 @@ The installer installs Docker Engine and the Compose plugin if needed, validates
 Caddy configuration, creates a persistent service under `/opt/xmesh-sub`, and obtains
 public TLS certificates automatically. The panel must already have valid HTTPS.
 
+Before installing, the script probes the Nexus **public API** readiness endpoint:
+`https://<panel-domain>/api/v1/health/ready`. This route checks PostgreSQL and Redis;
+`/health/ready` without `/api/v1` is not a Nexus public route and returns 404.
+If the probe fails, check Nexus availability and reverse-proxy routing for `/api/v1`
+from the new VPS. Do not confuse the Nexus readiness URL with the XMesh Sub
+`/healthz` endpoint, which only checks the HTTPS gateway.
+
 Test the installer without root or changes to the VPS:
 
     bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --dry-run
