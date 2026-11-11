@@ -14,7 +14,10 @@ grep -Fq 'header_up -Cookie' <<< "$out"
 grep -Fq 'read_only: true' <<< "$out"
 grep -Fq 'Validation successful' <<< "$out"
 # Nexus mounts its public readiness route under /api/v1. A bare /health/ready is 404.
+# Literal source-code signatures (not intended for shell expansion).
+# shellcheck disable=SC2016
 grep -Fq '"$PANEL/api/v1/health/ready"' install.sh
+# shellcheck disable=SC2016
 if grep -Fq '"$PANEL/health/ready"' install.sh; then
   echo 'ERROR: installer uses the old, unmounted Nexus readiness path' >&2
   exit 1
