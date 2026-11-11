@@ -1,0 +1,22 @@
+name: Sub gateway CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  installer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax and ShellCheck
+        run: |
+          bash -n install.sh tests/test-install.sh
+          shellcheck -s bash install.sh tests/test-install.sh
+      - name: Installer argument tests
+        run: bash tests/test-install.sh
+      - name: Validate rendered Caddy configuration
+        run: |
+          bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --dry-run | sed -n '/^# Caddyfile$/,/^# compose.yaml$/p' | sed '1d;$d' > Caddyfile
+          docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
