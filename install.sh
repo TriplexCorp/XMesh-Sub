@@ -28,6 +28,7 @@ valid_host() {
   local hostname=$1 label
   [[ ${#hostname} -le 253 && "$hostname" == *.* ]] || return 1
   [[ "$hostname" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
+  [[ "$hostname" =~ \.[A-Za-z]{2,}$ ]] || return 1
   local -a labels
   IFS='.' read -r -a labels <<< "$hostname"
   for label in "${labels[@]}"; do
