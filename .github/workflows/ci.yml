@@ -23,7 +23,7 @@ jobs:
           manifest=json.loads(pathlib.Path('release.json').read_text())
           assert manifest['schema']==1
           assert manifest['version']==pathlib.Path('VERSION').read_text().strip()
-          for name,key in [('install.sh','installSha256'),('manager.py','managerSha256')]:
+          for name,key in [('install.sh','installSha256'),('manager.py','managerSha256'),('flood_guard.py','floodGuardSha256')]:
               assert hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()==manifest[key], name
           PY
       - name: Installer argument tests
