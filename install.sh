@@ -257,6 +257,14 @@ docker run --rm -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy valid
 [[ ! -f "$ROOT/Caddyfile" ]] || cp -p "$ROOT/Caddyfile" "$ROOT/Caddyfile.previous"
 install -m 600 "$temp/Caddyfile" "$ROOT/Caddyfile"
 install -m 600 "$temp/compose.yaml" "$ROOT/compose.yaml"
+# The private sidecar's read-only bind mounts must exist BEFORE Compose starts.
+if [[ -s "$temp/flood_guard.py" ]]; then
+  install -m 644 "$temp/flood_guard.py" "$ROOT/flood_guard.py"
+  if [[ ! -s "$ROOT/flood.json" ]]; then
+    printf '%s\n' '{"enabled":true,"mode":"monitor","ipPerMinute":120}' > "$ROOT/flood.json"
+  fi
+  chmod 644 "$ROOT/flood.json"
+fi
 cd "$ROOT"
 docker compose pull
 docker compose up -d --remove-orphans
@@ -284,10 +292,6 @@ PY
 fi
 if [[ -s "$temp/manager.py" ]]; then
   install -m 700 "$temp/manager.py" "$ROOT/manager.py"
-  install -m 644 "$temp/flood_guard.py" "$ROOT/flood_guard.py"
-  [[ -f "$ROOT/flood.json" ]] ||
-    printf '%s\n' '{"enabled":true,"mode":"monitor","ipPerMinute":120}' > "$ROOT/flood.json"
-  chmod 644 "$ROOT/flood.json"
   install -m 600 "$temp/release.pub" "$ROOT/release.pub"
   install -m 600 "$temp/release.json" "$ROOT/release.json"
   if [[ -s "$temp/manager.json" ]]; then
