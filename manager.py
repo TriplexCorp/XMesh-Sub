@@ -97,7 +97,7 @@ def signed_release(public_key: Path = PUBLIC_KEY_FILE) -> dict:
             "schema", "version", "installSha256", "managerSha256"}
             or payload["schema"] != 1
             or not isinstance(payload["version"], str)
-            or not re.fullmatch(r"[0-9]+\\.[0-9]+\\.[0-9]+", payload["version"])):
+            or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", payload["version"])):
         raise ValueError("Invalid signed release manifest")
     for key in ("installSha256", "managerSha256"):
         digest = payload[key]
@@ -107,7 +107,7 @@ def signed_release(public_key: Path = PUBLIC_KEY_FILE) -> dict:
 
 
 def version_tuple(version: str) -> tuple[int, int, int]:
-    match = re.match(r"^(\\d+)\\.(\\d+)\\.(\\d+)", version)
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)", version)
     return tuple(map(int, match.groups())) if match else (0, 0, 0)
 
 
