@@ -130,9 +130,11 @@ class ManagerTest(unittest.TestCase):
     def test_update_requires_signed_digest_before_running_installer(self):
         release = {"schema": 1, "version": "9.9.9",
                    "installSha256": "0" * 64, "managerSha256": "1" * 64}
-        with patch.object(manager, "signed_release", return_value=release), \\
-             patch.object(manager, "get_public_bytes", return_value=b"#!/usr/bin/env bash\\necho good\\n"), \\
-             patch.object(manager.subprocess, "run") as execute:
+        with (
+            patch.object(manager, "signed_release", return_value=release),
+            patch.object(manager, "get_public_bytes", return_value=b"#!/usr/bin/env bash\necho good\n"),
+            patch.object(manager.subprocess, "run") as execute,
+        ):
             with self.assertRaises(ValueError):
                 manager.perform_update(self.config)
             execute.assert_not_called()
