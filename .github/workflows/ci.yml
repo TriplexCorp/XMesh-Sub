@@ -14,6 +14,30 @@ jobs:
         run: |
           bash -n install.sh tests/test-install.sh
           shellcheck -s bash install.sh tests/test-install.sh
+      - name: Verify edge guard hash is pinned by signed installer
+        run: |
+          python3 - <<'PY'
+          import hashlib,re,pathlib
+          installer=pathlib.Path('install.sh').read_text()
+          digest=re.search(r'hexdigest\(\)=="([0-9a-f]{64})", "Edge guard SHA-256 mismatch"',installer)
+          assert digest, 'Signed installer must pin edge guard SHA-256'
+          assert hashlib.sha256(pathlib.Path('flood_guard.py').read_bytes()).hexdigest()==digest.group(1)
+          PY
+      - name: Installer argument tests
+        run: bash tests/test-install.sh
+      - name: Outbound management agent tests
+        run: |
+          python3 -m py_compile manager.py flood_guard.py
+          python3 tests/test-manager.py
+          python3 tests/test-flood-guard.py
+      - name: Validate rendered Caddy configuration
+        run: |
+          bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --dry-run | sed -n '/^# Caddyfile$/,/^# compose.yaml$/p' | sed '1d;$d' > Caddyfile
+          docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: Validate managed edge shield Caddy configuration
+        run: |
+          printf '%064d\n' 0 | bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --enroll-token-stdin --dry-run | sed -n '/^# Caddyfile$/,/^# compose.yaml$/p' | sed '1d;$d' > Caddyfile
+          docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - name: Verify offline-signed release and exact build digests
         run: |
           base64 -d release.json.sig > release.sig.bin
@@ -23,16 +47,8 @@ jobs:
           manifest=json.loads(pathlib.Path('release.json').read_text())
           assert manifest['schema']==1
           assert manifest['version']==pathlib.Path('VERSION').read_text().strip()
+          assert set(manifest)=={'schema','version','installSha256','managerSha256'}
           for name,key in [('install.sh','installSha256'),('manager.py','managerSha256')]:
               assert hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()==manifest[key], name
           PY
-      - name: Installer argument tests
-        run: bash tests/test-install.sh
-      - name: Outbound management agent tests
-        run: |
-          python3 -m py_compile manager.py
-          python3 tests/test-manager.py
-      - name: Validate rendered Caddy configuration
-        run: |
-          bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --dry-run | sed -n '/^# Caddyfile$/,/^# compose.yaml$/p' | sed '1d;$d' > Caddyfile
-          docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+

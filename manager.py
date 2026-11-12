@@ -117,7 +117,7 @@ def backup_installation(root: Path = ROOT) -> Path:
     backup = Path(tempfile.mkdtemp(prefix="pre-update-", dir=str(destination)))
     backup.chmod(0o700)
     files = ("Caddyfile", "compose.yaml", "manager.py", "manager.json",
-             "release.pub", "release.json", "VERSION")
+             "release.pub", "release.json", "flood_guard.py", "flood.json", "VERSION")
     for name in files:
         old = root / name
         if old.is_file():
@@ -129,7 +129,7 @@ def backup_installation(root: Path = ROOT) -> Path:
 
 def restore_installation(backup: Path, root: Path = ROOT) -> None:
     for name in ("Caddyfile", "compose.yaml", "manager.py", "manager.json",
-                 "release.pub", "release.json", "VERSION"):
+                 "release.pub", "release.json", "flood_guard.py", "flood.json", "VERSION"):
         saved = backup / name
         target = root / name
         if saved.is_file():
@@ -209,9 +209,33 @@ def current_version(path: Path = VERSION_FILE) -> str:
         return "unknown"
 
 
+def update_edge_policy(payload: object, file: Path = ROOT / "flood.json") -> None:
+    """Apply only validated non-secret settings received from the authenticated Nexus poll."""
+    if not isinstance(payload, dict) or set(payload) != {"enabled", "mode", "ipPerMinute"}:
+        return
+    rate, mode, enabled = payload["ipPerMinute"], payload["mode"], payload["enabled"]
+    if (type(rate) is not int or rate not in range(30, 601, 30)
+            or mode not in ("monitor", "protect") or not isinstance(enabled, bool)):
+        return
+    file.parent.mkdir(parents=True, exist_ok=True)
+    # Keep the old policy if the filesystem write fails.
+    fd, name = tempfile.mkstemp(prefix=".flood.", dir=str(file.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            json.dump(payload, output, separators=(",", ":"))
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(name, 0o644)  # Only non-secret settings; read by unprivileged guard
+        os.replace(name, file)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
 def cycle(config: dict) -> bool:
     """Return True if updated, so systemd restarts the agent from newest file."""
     reply = service_request(config, "poll", {"version": current_version()})
+    update_edge_policy(reply.get("flood"))
     if reply.get("command") != "update":
         return False
     job = reply.get("jobId")

@@ -58,6 +58,23 @@ fi
 
 render_caddyfile() {
   if [[ -n "$EMAIL" ]]; then printf '{\n  email %s\n}\n\n' "$EMAIL"; fi
+  local flood_hook=''
+  if [[ -n "$ENROLL_TOKEN" || -f "$ROOT/manager.json" ]]; then
+    # The single trusted header is overwritten with the direct TCP peer.
+    # Ignore client-supplied X-Forwarded-For / CF-Connecting-IP.
+    flood_hook=$(cat <<'GUARD'
+    forward_auth xmesh-sub-flood:8080 {
+      uri /check
+      header_up X-XMesh-Peer {remote_host}
+      header_up X-Forwarded-Uri /check
+      header_up -X-Forwarded-For
+      header_up -CF-Connecting-IP
+      header_up -Authorization
+      header_up -Cookie
+    }
+GUARD
+)
+  fi
   cat <<CONF
 $DOMAIN {
   @subscriptions {
@@ -65,6 +82,7 @@ $DOMAIN {
     path_regexp ^($SUB_PATH|/sub|/portal)/[0-9a-f]{64}$
   }
   handle @subscriptions {
+$flood_hook
     reverse_proxy https://$PANEL_HOST {
       header_up Host $PANEL_HOST
       header_up -Authorization
@@ -120,6 +138,29 @@ services:
     tmpfs:
       - /tmp
 YAML
+  if [[ -n "$ENROLL_TOKEN" || -f "$ROOT/manager.json" ]]; then
+    cat <<'YAML'
+  # Private forward-auth only: no published host port or Docker socket.
+  xmesh-sub-flood:
+    image: python:3.13-alpine
+    restart: unless-stopped
+    user: "65534:65534"
+    read_only: true
+    pids_limit: 64
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    volumes:
+      - ./flood_guard.py:/app/flood_guard.py:ro
+      - ./flood.json:/etc/xmesh/flood.json:ro
+    command: ["python3", "-u", "/app/flood_guard.py"]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/check',timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+YAML
+  fi
 }
 if ((DRY_RUN)); then
   info "Validation successful, no host changes made."
@@ -194,8 +235,11 @@ XMESH_RELEASE_PUBLIC_KEY
   curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 8 --max-time 35 \
     https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/manager.py -o "$temp/manager.py" ||
     die "Could not download XMesh Sub manager"
-  # A signed, offline-approved manifest pins the exact manager and installer.
-  python3 - "$temp/release.json" "$temp/manager.py" <<'PY'
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 8 --max-time 35 \
+    https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/flood_guard.py -o "$temp/flood_guard.py" ||
+    die "Could not download XMesh Sub edge guard"
+  # A signed, offline-approved manifest pins every executable, including the guard.
+  python3 - "$temp/release.json" "$temp/manager.py" "$temp/flood_guard.py" <<'PY'
 import hashlib, json, pathlib, re, sys
 manifest=json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert set(manifest)=={"schema","version","installSha256","managerSha256"} and manifest["schema"]==1, "Invalid signed release schema"
@@ -203,14 +247,26 @@ assert isinstance(manifest["version"],str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0
 for key in ("installSha256","managerSha256"):
     assert isinstance(manifest[key],str) and re.fullmatch("[a-f0-9]{64}",manifest[key]), "Invalid digest"
 assert hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest()==manifest["managerSha256"], "Manager SHA-256 mismatch"
+# This digest is literally embedded in the signed install.sh, so old agents
+# can verify the unchanged four-field manifest and still update safely.
+assert hashlib.sha256(pathlib.Path(sys.argv[3]).read_bytes()).hexdigest()=="12ad8b2a901c191116a4a1e25ea33b5e431af5b3df874dbf30d45154cceae508", "Edge guard SHA-256 mismatch"
 PY
-  python3 -m py_compile "$temp/manager.py" || die "Manager failed syntax validation"
+  python3 -m py_compile "$temp/manager.py" "$temp/flood_guard.py" ||
+    die "Agent or edge guard failed syntax validation"
 fi
 docker run --rm -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ||
   die "Gateway configuration invalid, existing deployment unchanged"
 [[ ! -f "$ROOT/Caddyfile" ]] || cp -p "$ROOT/Caddyfile" "$ROOT/Caddyfile.previous"
 install -m 600 "$temp/Caddyfile" "$ROOT/Caddyfile"
 install -m 600 "$temp/compose.yaml" "$ROOT/compose.yaml"
+# The private sidecar's read-only bind mounts must exist BEFORE Compose starts.
+if [[ -s "$temp/flood_guard.py" ]]; then
+  install -m 644 "$temp/flood_guard.py" "$ROOT/flood_guard.py"
+  if [[ ! -s "$ROOT/flood.json" ]]; then
+    printf '%s\n' '{"enabled":true,"mode":"monitor","ipPerMinute":120}' > "$ROOT/flood.json"
+  fi
+  chmod 644 "$ROOT/flood.json"
+fi
 cd "$ROOT"
 docker compose pull
 docker compose up -d --remove-orphans
