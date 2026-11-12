@@ -56,6 +56,10 @@ class FloodGuardTests(unittest.TestCase):
                 policy.check(f"2001:db8:{i:x}::1", 240 + i / 100000)
             self.assertLessEqual(len(policy.counters), guard.MAX_IDENTITIES)
 
+    def test_server_has_bounded_workers_and_queue(self):
+        self.assertLessEqual(guard.BoundedHTTPServer.max_active_workers, 64)
+        self.assertLessEqual(guard.BoundedHTTPServer.request_queue_size, 128)
+
     def test_missing_policy_is_monitor_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             policy = guard.FloodGuard(Path(tmp) / "missing.json")
