@@ -95,6 +95,7 @@ class ManagerTest(unittest.TestCase):
             valid = {
                 "schema": 1, "version": "0.3.0",
                 "installSha256": "a" * 64, "managerSha256": "b" * 64,
+                "floodGuardSha256": "c" * 64,
             }
             metadata.write_text(json.dumps(valid, sort_keys=True, separators=(",", ":")))
             subprocess.run(["openssl", "pkeyutl", "-sign", "-inkey", str(key),
@@ -110,6 +111,23 @@ class ManagerTest(unittest.TestCase):
             ]):
                 with self.assertRaises(subprocess.CalledProcessError):
                     manager.signed_release(pub)
+
+    def test_edge_policy_accepts_authenticated_bounded_settings_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "flood.json"
+            payload = {"enabled": True, "mode": "protect", "ipPerMinute": 120}
+            manager.update_edge_policy(payload, path)
+            self.assertEqual(json.loads(path.read_text()), payload)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+            manager.update_edge_policy({
+                "enabled": True, "mode": "protect", "ipPerMinute": 0
+            }, path)
+            self.assertEqual(json.loads(path.read_text()), payload)
+            manager.update_edge_policy({
+                "enabled": True, "mode": "protect", "ipPerMinute": 120,
+                "command": "arbitrary"
+            }, path)
+            self.assertEqual(json.loads(path.read_text()), payload)
 
     def test_backup_and_rollback_restore_original_configuration(self):
         with tempfile.TemporaryDirectory() as tmp:
