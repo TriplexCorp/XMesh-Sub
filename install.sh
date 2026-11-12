@@ -3,14 +3,14 @@
 set -Eeuo pipefail
 umask 077
 ROOT=/opt/xmesh-sub
-PANEL='' DOMAIN='' SUB_PATH='' EMAIL='' DRY_RUN=0 ENROLL_TOKEN='' SKIP_MANAGER_RESTART=0
+PANEL='' DOMAIN='' SUB_PATH='' EMAIL='' DRY_RUN=0 ENROLL_TOKEN='' ENROLL_STDIN=0 SKIP_MANAGER_RESTART=0
 die() { printf 'XMesh Sub: ERROR: %s\n' "$*" >&2; exit 1; }
 info() { printf 'XMesh Sub: %s\n' "$*"; }
 usage() {
 cat <<'HELP'
 Usage (Ubuntu 22.04/24.04; run on a clean VPS with DNS + ports 80/443):
   sudo bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s [--email ops@example.org]
-For validation only append --dry-run.
+For validation only append --dry-run. For managed installation use --enroll-token-stdin and provide the key via stdin.
 HELP
 }
 while (($#)); do
@@ -19,16 +19,18 @@ while (($#)); do
       (($# >= 2)) || die "Missing value for $1"
       case "$1" in --panel) PANEL=$2;; --domain) DOMAIN=$2;; --path) SUB_PATH=$2;; --email) EMAIL=$2;; esac
       shift 2;;
-    --enroll-token)
-      (($# >= 2)) || die "Missing enrollment token"
-      ENROLL_TOKEN=$2
-      shift 2;;
+    --enroll-token-stdin) ENROLL_STDIN=1; shift;;
+    --enroll-token) die "Enrollment secrets must use --enroll-token-stdin, not process arguments";;
     --skip-manager-restart) SKIP_MANAGER_RESTART=1; shift;;
     --dry-run) DRY_RUN=1; shift;;
     -h|--help) usage; exit 0;;
     *) die "Unknown argument: $1";;
   esac
 done
+if ((ENROLL_STDIN)); then
+  # The secret is supplied through a here-document from the panel, not argv.
+  IFS= read -r ENROLL_TOKEN || die "Missing one-time enrollment token on stdin"
+fi
 valid_host() {
   local hostname=$1 label
   [[ ${#hostname} -le 253 && "$hostname" == *.* ]] || return 1
@@ -135,6 +137,9 @@ fi
   die "Only Ubuntu 22.04/24.04 LTS supported"
 command -v curl >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates; }
 if [[ -n "$ENROLL_TOKEN" || -f "$ROOT/manager.json" ]]; then
+  command -v openssl >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssl; }
+fi
+if [[ -n "$ENROLL_TOKEN" || -f "$ROOT/manager.json" ]]; then
   command -v python3 >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3; }
 fi
 getent ahosts "$DOMAIN" >/dev/null || die "Subscription DNS does not resolve; create A/AAAA record"
@@ -168,11 +173,37 @@ render_caddyfile >"$temp/Caddyfile"
 render_compose >"$temp/compose.yaml"
 chmod 600 "$temp/Caddyfile" "$temp/compose.yaml"
 if [[ -n "$ENROLL_TOKEN" || -f "$ROOT/manager.json" ]]; then
-  # The manager is outbound-only. Obtain the audited source before consuming
-  # a short-lived one-time enrollment code.
-  curl -fsSL --connect-timeout 8 --max-time 35 \
+  # Trust anchor: public Ed25519 key. Private signer must stay OFF the VPS and
+  # outside GitHub. Do not fall back to unsigned scripts or checksums from main.
+  cat >"$temp/release.pub" <<'XMESH_RELEASE_PUBLIC_KEY'
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA67uQhBdQaaf3O9i4DisJVG74G9DJASmHOuevLlarPHw=
+-----END PUBLIC KEY-----
+XMESH_RELEASE_PUBLIC_KEY
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 8 --max-time 35 \
+    https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/release.json -o "$temp/release.json" ||
+    die "Could not download signed release metadata"
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 8 --max-time 35 \
+    https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/release.json.sig -o "$temp/release.json.sig.b64" ||
+    die "Could not download release signature"
+  base64 -d "$temp/release.json.sig.b64" >"$temp/release.json.sig" ||
+    die "Invalid release signature encoding"
+  openssl pkeyutl -verify -pubin -inkey "$temp/release.pub" -rawin \
+    -in "$temp/release.json" -sigfile "$temp/release.json.sig" >/dev/null 2>&1 ||
+    die "Release Ed25519 signature verification failed; refusing root execution"
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 8 --max-time 35 \
     https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/manager.py -o "$temp/manager.py" ||
     die "Could not download XMesh Sub manager"
+  # A signed, offline-approved manifest pins the exact manager and installer.
+  python3 - "$temp/release.json" "$temp/manager.py" <<'PY'
+import hashlib, json, pathlib, re, sys
+manifest=json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert set(manifest)=={"schema","version","installSha256","managerSha256"} and manifest["schema"]==1, "Invalid signed release schema"
+assert isinstance(manifest["version"],str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",manifest["version"]), "Invalid release version"
+for key in ("installSha256","managerSha256"):
+    assert isinstance(manifest[key],str) and re.fullmatch("[a-f0-9]{64}",manifest[key]), "Invalid digest"
+assert hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest()==manifest["managerSha256"], "Manager SHA-256 mismatch"
+PY
   python3 -m py_compile "$temp/manager.py" || die "Manager failed syntax validation"
 fi
 docker run --rm -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ||
@@ -207,6 +238,8 @@ PY
 fi
 if [[ -s "$temp/manager.py" ]]; then
   install -m 700 "$temp/manager.py" "$ROOT/manager.py"
+  install -m 600 "$temp/release.pub" "$ROOT/release.pub"
+  install -m 600 "$temp/release.json" "$ROOT/release.json"
   if [[ -s "$temp/manager.json" ]]; then
     install -m 600 "$temp/manager.json" "$ROOT/manager.json"
   fi
@@ -226,6 +259,15 @@ Restart=always
 RestartSec=15
 NoNewPrivileges=true
 UMask=0077
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
 [Install]
 WantedBy=multi-user.target
 UNIT
@@ -236,9 +278,24 @@ UNIT
     systemctl restart xmesh-sub-manager.service
   fi
 fi
-curl -fsSL --connect-timeout 8 --max-time 20 \
-  https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/VERSION -o "$temp/VERSION" ||
-  die "Could not download XMesh Sub version"
+if [[ -s "$temp/release.json" ]]; then
+  python3 - "$temp/release.json" "$ROOT/VERSION" "$temp/VERSION" <<'PY'
+import json,pathlib,re,sys
+release=json.loads(pathlib.Path(sys.argv[1]).read_text())["version"]
+existing=pathlib.Path(sys.argv[2])
+previous=existing.read_text().strip() if existing.is_file() else "0.0.0"
+def components(version):
+    match=re.match(r"^(\d+)\.(\d+)\.(\d+)",version)
+    return tuple(map(int,match.groups())) if match else (0,0,0)
+if components(release)<components(previous):
+    raise SystemExit("Refusing signed release downgrade")
+pathlib.Path(sys.argv[3]).write_text(release+"\n")
+PY
+else
+  curl -fsSL --connect-timeout 8 --max-time 20 \
+    https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/VERSION -o "$temp/VERSION" ||
+    die "Could not download XMesh Sub version"
+fi
 install -m 644 "$temp/VERSION" "$ROOT/VERSION"
 info "Started. Check HTTPS health: https://$DOMAIN/healthz"
 info "Status: cd $ROOT && sudo docker compose ps"
