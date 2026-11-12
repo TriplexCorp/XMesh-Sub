@@ -47,8 +47,17 @@ fail_expected --panel https://panel.example.org --domain sub.example.org --path 
 fail_expected --panel https://panel.example.org --domain sub.example.org --path /s/
 fail_expected --panel https://panel.example.org --domain sub.example.org --path /s --email 'ops@evil.com;rm'
 token=$(printf 'a%.0s' {1..64})
-bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --enroll-token "$token" --dry-run >/dev/null
-fail_expected --panel https://panel.example.org --domain sub.example.org --path /s --enroll-token 'not-a-token'
+printf '%s\n' "$token" | bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --enroll-token-stdin --dry-run >/dev/null
+if bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --enroll-token "$token" --dry-run >/dev/null 2>&1; then
+  echo 'ERROR: enrollment tokens must never be accepted in argv' >&2; exit 1
+fi
+if printf '%s\n' invalid | bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --enroll-token-stdin --dry-run >/dev/null 2>&1; then
+  echo 'ERROR: malformed stdin enrollment token was accepted' >&2; exit 1
+fi
+grep -Fq 'openssl pkeyutl -verify' install.sh
+grep -Fq 'release.json.sig' install.sh
+grep -Fq 'ProtectKernelModules=true' install.sh
+grep -Fq 'NoNewPrivileges=true' install.sh
 grep -Fq 'xmesh-sub-manager.service' install.sh
 grep -Fq '/api/v1/sub-server/claim' install.sh
 grep -Fq 'SKIP_MANAGER_RESTART' install.sh
