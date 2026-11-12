@@ -8,9 +8,11 @@ Install XMesh Nexus first. Configure the panel domain, then save the subscriptio
 and path in **Subscription Studio**. Point the subscription domain DNS A/AAAA to a separate
 Ubuntu 22.04/24.04 VPS and open TCP ports 80 and 443 (optional UDP 443).
 
-Copy the auto-generated install command from Subscription Studio. Example:
-
-    curl -fsSL https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/install.sh | sudo bash -s -- --panel https://panel.example.org --domain sub.example.org --path /s
+Copy the one-command managed installer from Subscription Studio after generating a
+one-time enrollment token. The command downloads a vetted, immutable installer,
+checks its SHA-256 before root execution and provides the enrollment token via
+a stdin here-document, not via command-line arguments. Do not paste the
+one-time token into shell history or support messages.
 
 The installer installs Docker Engine and the Compose plugin if needed, validates the
 Caddy configuration, creates a persistent service under `/opt/xmesh-sub`, and obtains
@@ -60,32 +62,36 @@ Future work can add pairing, fleet reporting, and independent subscription rende
 
 See [SECURITY.md](SECURITY.md).
 
-## Managed updates (optional, one-time enrollment)
+## Signed managed updates
 
-The public HTTPS gateway can run without remote administration. To enable
-**Update XMesh Sub** in Subscription Studio, click **Connect management** as
-an owner. The panel issues a short-lived, single-use enrollment code, then
-shows an installer command containing `--enroll-token`. Run the command on the
-existing Sub VPS; the installer validates HTTPS, exchanges the enrollment code
-for a service token over HTTPS and installs a systemd outbound-only agent.
-The long-lived token is stored in `/opt/xmesh-sub/manager.json` with mode 0600.
-It is **not** returned to panel browsers after claiming, and the short-lived
-code cannot be replayed. Revoking/re-enrolling rotates the service credential.
+The management agent makes outbound-only HTTPS requests to Nexus. It accepts
+only the fixed `update` action, not arbitrary shell commands or URLs.
+The server owner generates a one-time enrollment code in Subscription Studio
+and copies a single command for installation and pairing.
 
-The agent uses outbound requests to `https://<panel>/api/v1/sub-server/agent/poll`
-and `.../report` every 20 seconds. The Nexus owner can enqueue **one fixed
-update action**; the agent will fetch the reviewed official XMesh-Sub installer
-from the project's main branch and rerun it with its existing domain and path.
-It never accepts URLs, shell commands, or other executable arguments from
-Nexus. **There is no inbound management port or Docker socket mounted into
-Caddy.** To inspect the manager on the VPS:
+Every management update downloads the **offline-signed** `release.json`
+manifest and verifies its Ed25519 signature against a public trust anchor
+installed with the vetted initial installer. The installer SHA-256 in that
+manifest must match before any root execution; the installer similarly checks
+the exact SHA-256 of `manager.py`. Unsigned or modified main-branch files
+are **rejected**, not executed.
+
+To sign a new vetted release, keep the private signing key OFF GitHub and the
+VPS, increment VERSION, and from a trusted signing workstation run
+`tools/sign-release.sh /secure/offline-ed25519-private.pem`. Review the
+manifest and commit `release.json` and `release.json.sig` with the code.
+Never commit the private key. CI verifies the signature and hashes.
+
+The agent stores recovery snapshots under `/opt/xmesh-sub/backups`
+with root-only permissions and attempts to restore the old gateway configuration
+if an update fails. Full OS-package rollback is not guaranteed. The root
+systemd agent has additional protection flags, but still possesses root
+privileges to install and update Docker/Compose. For production, keep the
+VPS and panel patched and review each signed release.
+
+To inspect the agent:
 
     sudo systemctl status xmesh-sub-manager
     sudo journalctl -u xmesh-sub-manager -n 50 --no-pager
 
-The agent and update code execute as root. Protect the VPS and its GitHub supply
-chain, use TLS, and review changes before issuing remote updates. Updates may
-briefly interrupt the public gateway. If Nexus is unreachable, the agent cannot
-receive update tasks, but Caddy keeps serving subscription requests when Nexus
-connectivity returns. For current versions, enrollment and management target a
-**single** XMesh Sub server per Nexus installation, not a multi-server fleet.
+Only one managed Sub server is supported per Nexus installation.
