@@ -242,12 +242,14 @@ XMESH_RELEASE_PUBLIC_KEY
   python3 - "$temp/release.json" "$temp/manager.py" "$temp/flood_guard.py" <<'PY'
 import hashlib, json, pathlib, re, sys
 manifest=json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert set(manifest)=={"schema","version","installSha256","managerSha256","floodGuardSha256"} and manifest["schema"]==1, "Invalid signed release schema"
+assert set(manifest)=={"schema","version","installSha256","managerSha256"} and manifest["schema"]==1, "Invalid signed release schema"
 assert isinstance(manifest["version"],str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",manifest["version"]), "Invalid release version"
-for key in ("installSha256","managerSha256","floodGuardSha256"):
+for key in ("installSha256","managerSha256"):
     assert isinstance(manifest[key],str) and re.fullmatch("[a-f0-9]{64}",manifest[key]), "Invalid digest"
 assert hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest()==manifest["managerSha256"], "Manager SHA-256 mismatch"
-assert hashlib.sha256(pathlib.Path(sys.argv[3]).read_bytes()).hexdigest()==manifest["floodGuardSha256"], "Edge guard SHA-256 mismatch"
+# This digest is literally embedded in the signed install.sh, so old agents
+# can verify the unchanged four-field manifest and still update safely.
+assert hashlib.sha256(pathlib.Path(sys.argv[3]).read_bytes()).hexdigest()=="12ad8b2a901c191116a4a1e25ea33b5e431af5b3df874dbf30d45154cceae508", "Edge guard SHA-256 mismatch"
 PY
   python3 -m py_compile "$temp/manager.py" "$temp/flood_guard.py" ||
     die "Agent or edge guard failed syntax validation"
