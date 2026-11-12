@@ -107,10 +107,50 @@ class FloodGuard:
         return False
 
 
+class BoundedHTTPServer(ThreadingHTTPServer):
+    # An attacker must not be able to create an unbounded number of Python
+    # threads using slow or parallel HTTP connections to the private sidecar.
+    daemon_threads = True
+    request_queue_size = 128
+    max_active_workers = 64
+
+    def __init__(self, *args: object, **kwargs: object):
+        super().__init__(*args, **kwargs)
+        self._workers = threading.BoundedSemaphore(self.max_active_workers)
+
+    def process_request(self, request, client_address) -> None:
+        if not self._workers.acquire(blocking=False):
+            try:
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Cache-Control: private, no-store\r\n"
+                    b"Retry-After: 1\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                )
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._workers.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._workers.release()
+
+
 class Handler(BaseHTTPRequestHandler):
     guard = FloodGuard()
     server_version = "XMesh-Sub"
     sys_version = ""
+
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(4)
 
     def do_GET(self) -> None:
         if self.path != "/check":
@@ -136,7 +176,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+    BoundedHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
 
 
 if __name__ == "__main__":
