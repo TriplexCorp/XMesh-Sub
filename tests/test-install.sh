@@ -47,7 +47,15 @@ fail_expected --panel https://panel.example.org --domain sub.example.org --path 
 fail_expected --panel https://panel.example.org --domain sub.example.org --path /s/
 fail_expected --panel https://panel.example.org --domain sub.example.org --path /s --email 'ops@evil.com;rm'
 token=$(printf 'a%.0s' {1..64})
-printf '%s\n' "$token" | bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --enroll-token-stdin --dry-run >/dev/null
+managed=$(printf '%s\n' "$token" | bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --enroll-token-stdin --dry-run)
+grep -Fq 'forward_auth xmesh-sub-flood:8080' <<< "$managed"
+grep -Fq 'header_up X-XMesh-Peer {remote_host}' <<< "$managed"
+grep -Fq 'header_up -X-Forwarded-For' <<< "$managed"
+grep -Fq 'user: "65534:65534"' <<< "$managed"
+grep -Fq 'flood_guard.py:/app/flood_guard.py:ro' <<< "$managed"
+if grep -Eq '(^|[[:space:]])- "[0-9]+:8080' <<< "$managed"; then
+  echo 'ERROR: flood shield management port must never be exposed' >&2; exit 1
+fi
 if bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --enroll-token "$token" --dry-run >/dev/null 2>&1; then
   echo 'ERROR: enrollment tokens must never be accepted in argv' >&2; exit 1
 fi
