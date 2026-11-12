@@ -95,3 +95,24 @@ To inspect the agent:
     sudo journalctl -u xmesh-sub-manager -n 50 --no-pager
 
 Only one managed Sub server is supported per Nexus installation.
+
+### Edge flood shield (release 0.4.0, signing required)
+
+The managed Sub gateway uses a private Python forward-auth sidecar (no published
+port) to count requests by Caddy's actual TCP peer IP. Untrusted forwarding
+headers are removed from requests to the guard. IPv6 addresses are grouped into
+/64 prefixes. It starts in **monitor** mode, with 120 requests/minute per peer
+and a 20-request burst allowance. A protect policy responds with HTTP 429
+and Retry-After: 60 without forwarding the request to Nexus. Nexus limits
+subscriptions separately by SHA-256 of the bearer token using atomic Redis
+counters, and the panel owner controls the combined policy.
+
+**Do not deploy the development branch directly.** The new installer, manager,
+and flood_guard.py are executable artifacts. Release 0.4.0 must first be
+signed with the existing trusted Ed25519 release key using
+`tools/sign-release.sh /secure/offline-key.pem` from an offline workstation.
+The generated release.json and release.json.sig must pass CI hash and
+signature verification before publishing to main. Old agents cannot accept
+unsigned updates, and the Nexus one-command bootstrap must be updated to
+pin the approved installer commit and its SHA-256. Test the new stack on a
+separate VPS before enabling protect mode for production subscribers.
