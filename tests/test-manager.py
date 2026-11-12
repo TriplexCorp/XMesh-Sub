@@ -95,7 +95,6 @@ class ManagerTest(unittest.TestCase):
             valid = {
                 "schema": 1, "version": "0.3.0",
                 "installSha256": "a" * 64, "managerSha256": "b" * 64,
-                "floodGuardSha256": "c" * 64,
             }
             metadata.write_text(json.dumps(valid, sort_keys=True, separators=(",", ":")))
             subprocess.run(["openssl", "pkeyutl", "-sign", "-inkey", str(key),
