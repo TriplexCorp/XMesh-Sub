@@ -94,12 +94,12 @@ def signed_release(public_key: Path = PUBLIC_KEY_FILE) -> dict:
         ], check=True, timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     payload = json.loads(metadata)
     if (not isinstance(payload, dict) or set(payload) != {
-            "schema", "version", "installSha256", "managerSha256", "floodGuardSha256"}
+            "schema", "version", "installSha256", "managerSha256"}
             or payload["schema"] != 1
             or not isinstance(payload["version"], str)
             or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", payload["version"])):
         raise ValueError("Invalid signed release manifest")
-    for key in ("installSha256", "managerSha256", "floodGuardSha256"):
+    for key in ("installSha256", "managerSha256"):
         digest = payload[key]
         if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
             raise ValueError("Invalid signed release digest")
