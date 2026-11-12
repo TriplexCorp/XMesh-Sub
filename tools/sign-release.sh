@@ -13,8 +13,7 @@ if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
     raise SystemExit("Invalid release version")
 out={"schema":1,"version":version,
      "installSha256":hashlib.sha256(Path("install.sh").read_bytes()).hexdigest(),
-     "managerSha256":hashlib.sha256(Path("manager.py").read_bytes()).hexdigest(),
-     "floodGuardSha256":hashlib.sha256(Path("flood_guard.py").read_bytes()).hexdigest()}
+     "managerSha256":hashlib.sha256(Path("manager.py").read_bytes()).hexdigest()}
 Path("release.json").write_text(json.dumps(out,separators=(",", ":"),sort_keys=True)+"\n")
 PY
 signature=$(mktemp)
