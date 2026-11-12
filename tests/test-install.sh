@@ -46,4 +46,10 @@ fail_expected --panel https://panel.example.org --domain sub.example.org --path 
 fail_expected --panel https://panel.example.org --domain sub.example.org --path /s/../login
 fail_expected --panel https://panel.example.org --domain sub.example.org --path /s/
 fail_expected --panel https://panel.example.org --domain sub.example.org --path /s --email 'ops@evil.com;rm'
+token=$(printf 'a%.0s' {1..64})
+bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --enroll-token "$token" --dry-run >/dev/null
+fail_expected --panel https://panel.example.org --domain sub.example.org --path /s --enroll-token 'not-a-token'
+grep -Fq 'xmesh-sub-manager.service' install.sh
+grep -Fq '/api/v1/sub-server/claim' install.sh
+grep -Fq 'SKIP_MANAGER_RESTART' install.sh
 echo 'Installer validation tests passed'
