@@ -56,6 +56,34 @@ The edge stores no user records, admin secrets, or database credentials. It does
 subscription responses or configure request access logging. CDN and VPS provider logs
 are external to this deployment and require separate review.
 
+## Personal portal button in VPN applications
+
+Nexus returns `profile-web-page-url` on authenticated subscription responses.
+When XMesh Subscription Studio has no custom page URL, the header targets
+the **same existing personal subscription URL** with `?view=portal`, for example:
+
+`https://sub.example.org/s/<64-character-personal-token>?view=portal`
+
+This parameter deliberately forces the HTML portal even when a VPN client's
+embedded browser sends a VPN application User-Agent. Without the parameter,
+the canonical link still serves a feed to VPN applications and an HTML portal
+to normal browsers. Clients that support the metadata (including Happ) render
+the personal webpage button; the app itself chooses icon artwork.
+
+The Caddy gateway forwards the original path, query string and response headers
+including `profile-web-page-url`, `profile-title`, `support-url`,
+`subscription-userinfo` and `announce` without rewriting them.
+The gateway does **not** store subscriber metadata, create public log files
+or mint an additional portal token. The URL is a bearer credential:
+do not publish it in tickets, logs, CI output or screenshots.
+
+If the website button is missing, inspect headers locally using a
+**real, private, redacted test subscription** and verify the XMesh Nexus
+Subscription Studio setting **“Личный кабинет в VPN-приложениях”**.
+A blank custom URL means “use the personal XMesh portal”; a configured
+HTTPS URL overrides it with a shared external webpage. Disabling the setting
+omits the header, but leaves the subscription itself working.
+
 **Do not redirect production users until DNS, TLS, health, and a sample subscription are verified.**
 Changing the actual hostname in issued links can require clients to re-import them.
 Future work can add pairing, fleet reporting, and independent subscription rendering.

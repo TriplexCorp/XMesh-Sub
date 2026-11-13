@@ -10,6 +10,17 @@ fail_expected() {
 out=$(bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --dry-run)
 grep -Fq 'path_regexp ^(/s|/sub|/portal)/[0-9a-f]{64}$' <<< "$out"
 grep -Fq 'reverse_proxy https://panel.example.org' <<< "$out"
+# The standard proxy must retain origin subscription metadata, including
+# profile-web-page-url and support-url. The personal webpage points to the
+# same allowlisted /s/{token} route with ?view=portal.
+# Caddy reverse_proxy forwards query parameters and upstream response headers
+# by default. Do not introduce response-header stripping or URI rewriting.
+if grep -Eq 'header_down|uri strip_prefix|rewrite \*|header -profile-web-page-url|header -support-url' <<< "$out"; then
+  echo 'ERROR: gateway must not strip subscription profile metadata' >&2
+  exit 1
+fi
+grep -Fq 'Referrer-Policy "no-referrer"' <<< "$out"
+grep -Fq 'Cache-Control "private, no-store"' <<< "$out"
 grep -Fq 'header_up -Cookie' <<< "$out"
 # A real HTML portal needs its exact CSS/JS files; all other paths remain 404.
 grep -Fq 'path /subscription-studio.css /subscription-surface.css /subscription-public.css /qr-code.js /subscription-experience.js /subscription-traffic.js /subscription-portal.js' <<< "$out"
