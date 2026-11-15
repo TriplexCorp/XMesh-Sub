@@ -71,6 +71,12 @@ $DOMAIN {
     forward_auth unix//run/xmesh-sub/rate.sock {
       uri /check
       header_up -*
+      # forward_auth may otherwise add the original URI automatically.
+      header_up -X-Forwarded-Uri
+      header_up -X-Forwarded-Method
+      header_up -X-Forwarded-For
+      header_up -Authorization
+      header_up -Cookie
       header_up X-XMesh-Peer-IP {remote_host}
     }
     reverse_proxy https://$PANEL_HOST {
