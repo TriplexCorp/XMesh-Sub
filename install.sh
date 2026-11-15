@@ -431,7 +431,52 @@ gh_major=${BASH_REMATCH[1]} gh_minor=${BASH_REMATCH[2]} gh_patch=${BASH_REMATCH[
 (( gh_major > 2 || (gh_major == 2 && (gh_minor > 102 || (gh_minor == 102 && gh_patch >= 0))) )) ||
   die "GitHub CLI 2.102.0+ is required to verify release provenance"
 verify_artifact() {
-  gh attestation verify "$1" --repo TriplexCorp/XMesh-Sub \
+  # Fetch PUBLIC bundles, then cryptographically verify OFFLINE. No gh login,
+  # GH_TOKEN, release private key, or GitHub account is needed on a VPS.
+  python3 - "$1" "$temp/attestation.jsonl" <<'PY'
+import hashlib,json,pathlib,ssl,sys,urllib.request,urllib.parse
+file=pathlib.Path(sys.argv[1])
+digest=hashlib.sha256(file.read_bytes()).hexdigest()
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,request,fp,code,msg,headers,newurl):
+        return None
+opener=urllib.request.build_opener(
+    urllib.request.HTTPSHandler(context=ssl.create_default_context()),NoRedirect())
+def fetch(url,limit):
+    with opener.open(urllib.request.Request(url,headers={
+        "Accept":"application/vnd.github+json","User-Agent":"XMesh-Sub-Release/1"
+    }),timeout=25) as response:
+        data=response.read(limit+1)
+    if len(data)>limit: raise ValueError("Attestation response oversized")
+    return data
+index=json.loads(fetch(
+    "https://api.github.com/repos/TriplexCorp/XMesh-Sub/attestations/sha256:"+digest,256*1024))
+entries=index.get("attestations") if isinstance(index,dict) else None
+if not isinstance(entries,list) or not 1<=len(entries)<=30:
+    raise ValueError("No public artifact attestations")
+bundles=[]
+for entry in entries[:12]:
+    if not isinstance(entry,dict): continue
+    bundle=entry.get("bundle")
+    if bundle is None:
+        link=entry.get("bundle_url")
+        if not isinstance(link,str):continue
+        url=urllib.parse.urlparse(link)
+        host=(url.hostname or "").lower()
+        if (url.scheme!="https" or url.username or url.password or
+            url.port not in (None,443) or
+            not (host.endswith(".blob.core.windows.net") or
+                 host.endswith(".githubusercontent.com"))):
+            raise ValueError("Untrusted attestation bundle URL")
+        bundle=json.loads(fetch(link,256*1024))
+    if isinstance(bundle,dict) and "verificationMaterial" in bundle and "dsseEnvelope" in bundle:
+        bundles.append(bundle)
+if not bundles:raise ValueError("No usable artifact attestation")
+pathlib.Path(sys.argv[2]).write_text(
+    "".join(json.dumps(x,separators=(",",":"))+"\n" for x in bundles))
+PY
+  gh attestation verify "$1" --bundle "$temp/attestation.jsonl" \
+    --repo TriplexCorp/XMesh-Sub \
     --cert-identity 'https://github.com/TriplexCorp/XMesh-Sub/.github/workflows/attested-release.yml@refs/heads/main' \
     --source-ref refs/heads/main --source-digest "$RELEASE_SHA" \
     --deny-self-hosted-runners >/dev/null ||
