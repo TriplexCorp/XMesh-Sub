@@ -3,14 +3,14 @@
 set -Eeuo pipefail
 umask 077
 ROOT=/opt/xmesh-sub
-PANEL='' DOMAIN='' SUB_PATH='' EMAIL='' DRY_RUN=0 ENROLL_TOKEN='' ENROLL_STDIN=0 SKIP_MANAGER_RESTART=0
+PANEL='' DOMAIN='' SUB_PATH='' EMAIL='' DRY_RUN=0 ENROLL_TOKEN='' ENROLL_STDIN=0 SKIP_MANAGER_RESTART=0 RELEASE_SHA=''
 die() { printf 'XMesh Sub: ERROR: %s\n' "$*" >&2; exit 1; }
 info() { printf 'XMesh Sub: %s\n' "$*"; }
 usage() {
 cat <<'HELP'
 Usage (Ubuntu 22.04/24.04; run on a clean VPS with DNS + ports 80/443):
   sudo bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s [--email ops@example.org]
-For validation only append --dry-run. For managed installation use --enroll-token-stdin and provide the key via stdin.
+For validation only append --dry-run. Production requires --release-sha from the automatically verified Nexus command.\nFor managed installation use --enroll-token-stdin and provide the key via stdin.
 HELP
 }
 while (($#)); do
@@ -22,6 +22,7 @@ while (($#)); do
     --enroll-token-stdin) ENROLL_STDIN=1; shift;;
     --enroll-token) die "Enrollment secrets must use --enroll-token-stdin, not process arguments";;
     --skip-manager-restart) SKIP_MANAGER_RESTART=1; shift;;
+    --release-sha) (($# >= 2)) || die 'Missing release SHA'; RELEASE_SHA=$2; shift 2;;
     --dry-run) DRY_RUN=1; shift;;
     -h|--help) usage; exit 0;;
     *) die "Unknown argument: $1";;
@@ -366,17 +367,18 @@ if ((DRY_RUN)); then
 fi
 
 ((EUID == 0)) || die "Run with sudo"
+[[ "$RELEASE_SHA" =~ ^[a-f0-9]{40}$ ]] || die "Use the automatically attested installer command from Nexus; --release-sha is required"
 [[ -f /etc/os-release ]] || die "Unsupported OS"
 # shellcheck disable=SC1091
 . /etc/os-release
 [[ "$ID" == ubuntu && ( "$VERSION_ID" == "22.04" || "$VERSION_ID" == "24.04" ) ]] ||
   die "Only Ubuntu 22.04/24.04 LTS supported"
-command -v curl >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates; }
+command -v curl >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y -qq curl ca-certificates; }
 if [[ -n "$ENROLL_TOKEN" || -f "$ROOT/manager.json" ]]; then
-  command -v openssl >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssl; }
+  command -v openssl >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y -qq openssl; }
 fi
 if [[ -n "$ENROLL_TOKEN" || -f "$ROOT/manager.json" ]]; then
-  command -v python3 >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3; }
+  command -v python3 >/dev/null || { apt-get update -qq; DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y -qq python3; }
 fi
 getent ahosts "$DOMAIN" >/dev/null || die "Subscription DNS does not resolve; create A/AAAA record"
 curl -fsS --connect-timeout 7 --max-time 15 --output /dev/null "$PANEL/api/v1/health/ready" ||
@@ -391,14 +393,14 @@ fi
 if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; then
   info "Installing official Docker Engine and Compose..."
   apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg
+  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y ca-certificates curl gnupg
   install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
   chmod a+r /etc/apt/keyrings/docker.asc
   printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n' \
     "$(dpkg --print-architecture)" "$VERSION_CODENAME" >/etc/apt/sources.list.d/docker.list
   apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 fi
 systemctl enable --now docker >/dev/null
 mkdir -p "$ROOT/data" "$ROOT/config"
@@ -418,40 +420,48 @@ chmod 600 "$temp/Caddyfile" "$temp/compose.yaml" "$temp/limiter.py"
 if command -v python3 >/dev/null; then
   python3 -m py_compile "$temp/limiter.py" || die "Invalid edge limiter"
 fi
-if [[ -n "$ENROLL_TOKEN" || -f "$ROOT/manager.json" ]]; then
-  # Trust anchor: public Ed25519 key. Private signer must stay OFF the VPS and
-  # outside GitHub. Do not fall back to unsigned scripts or checksums from main.
-  cat >"$temp/release.pub" <<'XMESH_RELEASE_PUBLIC_KEY'
------BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEA67uQhBdQaaf3O9i4DisJVG74G9DJASmHOuevLlarPHw=
------END PUBLIC KEY-----
-XMESH_RELEASE_PUBLIC_KEY
-  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 8 --max-time 35 \
-    https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/release.json -o "$temp/release.json" ||
-    die "Could not download signed release metadata"
-  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 8 --max-time 35 \
-    https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/release.json.sig -o "$temp/release.json.sig.b64" ||
-    die "Could not download release signature"
-  base64 -d "$temp/release.json.sig.b64" >"$temp/release.json.sig" ||
-    die "Invalid release signature encoding"
-  openssl pkeyutl -verify -pubin -inkey "$temp/release.pub" -rawin \
-    -in "$temp/release.json" -sigfile "$temp/release.json.sig" >/dev/null 2>&1 ||
-    die "Release Ed25519 signature verification failed; refusing root execution"
-  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 8 --max-time 35 \
-    https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/manager.py -o "$temp/manager.py" ||
-    die "Could not download XMesh Sub manager"
-  # A signed, offline-approved manifest pins the exact manager and installer.
-  python3 - "$temp/release.json" "$temp/manager.py" <<'PY'
-import hashlib, json, pathlib, re, sys
-manifest=json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert set(manifest)=={"schema","version","installSha256","managerSha256"} and manifest["schema"]==1, "Invalid signed release schema"
-assert isinstance(manifest["version"],str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",manifest["version"]), "Invalid release version"
-for key in ("installSha256","managerSha256"):
-    assert isinstance(manifest[key],str) and re.fullmatch("[a-f0-9]{64}",manifest[key]), "Invalid digest"
-assert hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest()==manifest["managerSha256"], "Manager SHA-256 mismatch"
+# Verify the installer itself BEFORE running anything other than fixed setup.
+# The action's OIDC certificate binds this exact file to a reviewed workflow
+# and the immutable commit, not merely to GitHub's mutable main branch.
+command -v gh >/dev/null || die "Install the official GitHub CLI using the Nexus installer command"
+command -v python3 >/dev/null || die "Python 3 is required for release verification"
+read -r _ gh_major gh_minor gh_patch _ < <(gh version | head -n1 | sed -E 's/^gh version ([0-9]+)[.]([0-9]+)[.]([0-9]+).*$/gh \\1 \\2 \\3/')
+[[ "$gh_major" =~ ^[0-9]+$ && "$gh_minor" =~ ^[0-9]+$ && "$gh_patch" =~ ^[0-9]+$ ]] ||
+  die "Invalid GitHub CLI version"
+(( gh_major > 2 || (gh_major == 2 && (gh_minor > 102 || (gh_minor == 102 && gh_patch >= 0))) )) ||
+  die "GitHub CLI 2.102.0+ is required to verify release provenance"
+verify_artifact() {
+  gh attestation verify "$1" --repo TriplexCorp/XMesh-Sub \\
+    --cert-identity 'https://github.com/TriplexCorp/XMesh-Sub/.github/workflows/attested-release.yml@refs/heads/main' \\
+    --source-ref refs/heads/main --source-digest "$RELEASE_SHA" \\
+    --deny-self-hosted-runners >/dev/null ||
+    die "Untrusted release artifact; refused root execution"
+}
+verify_artifact "${BASH_SOURCE[0]}"
+curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 8 --max-time 35 \\
+  "https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/$RELEASE_SHA/release_verify.py" \\
+  -o "$temp/release_verify.py" || die "Could not download provenance verifier"
+verify_artifact "$temp/release_verify.py"
+mkdir -m 700 "$temp/revision"
+python3 "$temp/release_verify.py" stage "$RELEASE_SHA" "$temp/revision" ||
+  die "Release artifacts failed OIDC provenance verification"
+cp "$temp/revision/manager.py" "$temp/manager.py"
+python3 -m py_compile "$temp/manager.py" "$temp/release_verify.py" ||
+  die "Verified manager/verifier failed syntax validation"
+# Refuse downgrade BEFORE mutating the gateway or its configuration.
+python3 - "$temp/revision/VERSION" "$ROOT/VERSION" <<'PY'
+import pathlib,re,sys
+new=pathlib.Path(sys.argv[1]).read_text().strip()
+old_file=pathlib.Path(sys.argv[2])
+old=old_file.read_text().strip() if old_file.is_file() else '0.0.0'
+def semver(s):
+    if not re.fullmatch(r'\\d+\\.\\d+\\.\\d+',s):
+        raise SystemExit("Invalid release version")
+    return tuple(map(int,s.split('.')))
+if semver(new)<semver(old):
+    raise SystemExit("Refusing release downgrade")
 PY
-  python3 -m py_compile "$temp/manager.py" || die "Manager failed syntax validation"
-fi
+
 docker run --rm -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ||
   die "Gateway configuration invalid, existing deployment unchanged"
 [[ ! -f "$ROOT/Caddyfile" ]] || cp -p "$ROOT/Caddyfile" "$ROOT/Caddyfile.previous"
@@ -505,8 +515,9 @@ PY
 fi
 if [[ -s "$temp/manager.py" ]]; then
   install -m 700 "$temp/manager.py" "$ROOT/manager.py"
-  install -m 600 "$temp/release.pub" "$ROOT/release.pub"
-  install -m 600 "$temp/release.json" "$ROOT/release.json"
+  install -m 700 "$temp/revision/release_verify.py" "$ROOT/release_verify.py"
+  printf "%s\\n" "$RELEASE_SHA" > "$temp/RELEASE_SHA"
+  install -m 600 "$temp/RELEASE_SHA" "$ROOT/RELEASE_SHA"
   if [[ -s "$temp/manager.json" ]]; then
     install -m 600 "$temp/agent-key.pem" "$ROOT/agent-key.pem"
     install -m 600 "$temp/manager.json" "$ROOT/manager.json"
@@ -546,25 +557,7 @@ UNIT
     systemctl restart xmesh-sub-manager.service
   fi
 fi
-if [[ -s "$temp/release.json" ]]; then
-  python3 - "$temp/release.json" "$ROOT/VERSION" "$temp/VERSION" <<'PY'
-import json,pathlib,re,sys
-release=json.loads(pathlib.Path(sys.argv[1]).read_text())["version"]
-existing=pathlib.Path(sys.argv[2])
-previous=existing.read_text().strip() if existing.is_file() else "0.0.0"
-def components(version):
-    match=re.match(r"^(\d+)\.(\d+)\.(\d+)",version)
-    return tuple(map(int,match.groups())) if match else (0,0,0)
-if components(release)<components(previous):
-    raise SystemExit("Refusing signed release downgrade")
-pathlib.Path(sys.argv[3]).write_text(release+"\n")
-PY
-else
-  curl -fsSL --connect-timeout 8 --max-time 20 \
-    https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/VERSION -o "$temp/VERSION" ||
-    die "Could not download XMesh Sub version"
-fi
-install -m 644 "$temp/VERSION" "$ROOT/VERSION"
+install -m 644 "$temp/revision/VERSION" "$ROOT/VERSION"
 info "Started. Check HTTPS health: https://$DOMAIN/healthz"
 info "Status: cd $ROOT && sudo docker compose ps"
 info "Upgrade: cd $ROOT && sudo docker compose pull && sudo docker compose up -d"
