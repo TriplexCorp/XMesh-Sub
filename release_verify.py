@@ -6,7 +6,10 @@ Only the trusted main-branch release workflow can authorize privileged code.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import tempfile
+from urllib.parse import urlparse
 from pathlib import Path
 import re
 import ssl
@@ -65,20 +68,69 @@ def latest_source_sha() -> str:
     return sha
 
 
+def public_bundles(file: Path) -> list[dict]:
+    """Fetch public Sigstore bundles without a GitHub login or access token.
+
+    The API response and bundle URLs are untrusted. The actual signature,
+    signer identity, artifact digest and source SHA are checked by gh offline.
+    """
+    digest = hashlib.sha256(file.read_bytes()).hexdigest()
+    index = json.loads(fetch_bytes(
+        f"https://api.github.com/repos/{REPO}/attestations/sha256:{digest}", 256 * 1024))
+    entries = index.get("attestations") if isinstance(index, dict) else None
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 30:
+        raise ValueError("No public attestation bundles")
+    bundles: list[dict] = []
+    for entry in entries[:12]:
+        if not isinstance(entry, dict):
+            continue
+        bundle = entry.get("bundle")
+        if bundle is None:
+            link = entry.get("bundle_url")
+            if not isinstance(link, str):
+                continue
+            url = urlparse(link)
+            host = (url.hostname or "").lower()
+            if (url.scheme != "https" or url.username or url.password
+                    or url.port not in (None, 443)
+                    or not (host.endswith(".blob.core.windows.net")
+                            or host.endswith(".githubusercontent.com"))):
+                raise ValueError("Untrusted attestation bundle endpoint")
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+                NoRedirect(),
+            )
+            with opener.open(link, timeout=25) as response:
+                data = response.read(256 * 1024 + 1)
+            if len(data) > 256 * 1024:
+                raise ValueError("Oversized attestation bundle")
+            bundle = json.loads(data)
+        if isinstance(bundle, dict) and "verificationMaterial" in bundle and "dsseEnvelope" in bundle:
+            bundles.append(bundle)
+    if not bundles:
+        raise ValueError("No usable signed provenance bundles")
+    return bundles
+
+
 def verify_file(file: Path, sha: str) -> None:
     if not SHA_RE.fullmatch(sha) or not file.is_file() or file.is_symlink():
         raise ValueError("Invalid release artifact")
     ensure_gh()
-    subprocess.run([
-        "gh", "attestation", "verify", str(file),
-        "--repo", REPO,
-        "--cert-identity", CERT_IDENTITY,
-        "--source-ref", SOURCE_REF,
-        "--source-digest", sha,
-        "--deny-self-hosted-runners",
-    ], check=True, timeout=90, stdout=subprocess.DEVNULL,
-       stderr=subprocess.DEVNULL)
-
+    bundles = public_bundles(file)
+    with tempfile.TemporaryDirectory(prefix="xmesh-attestation-") as tmp:
+        path = Path(tmp) / "bundles.jsonl"
+        path.write_text("".join(json.dumps(x, separators=(",", ":")) + "\n" for x in bundles))
+        # --bundle performs signature verification OFFLINE: no GH_TOKEN,
+        # gh auth login, credential store, or privileged GitHub API is needed.
+        subprocess.run([
+            "gh", "attestation", "verify", str(file), "--bundle", str(path),
+            "--repo", REPO,
+            "--cert-identity", CERT_IDENTITY,
+            "--source-ref", SOURCE_REF,
+            "--source-digest", sha,
+            "--deny-self-hosted-runners",
+        ], check=True, timeout=90, stdout=subprocess.DEVNULL,
+           stderr=subprocess.DEVNULL)
 
 def stage_revision(sha: str, directory: Path) -> dict[str, Path]:
     if not SHA_RE.fullmatch(sha) or not directory.is_dir() or directory.is_symlink():
