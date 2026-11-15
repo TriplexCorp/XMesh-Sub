@@ -28,7 +28,8 @@ IDLE_SECONDS = 120
 DEFAULT_LIMIT = 120
 
 
-def load_policy(path: Path = POLICY_FILE) -> tuple[bool, str, int]:
+def load_policy(path: Path | None = None) -> tuple[bool, str, int]:
+    path = POLICY_FILE if path is None else path
     # Broken/missing policy must never silently disable enforcement.
     # Fresh installs create a local protected policy before starting Caddy.
     with path.open("rb") as stream:
@@ -126,6 +127,10 @@ class PolicyHandler(BaseHTTPRequestHandler):
             return
         try:
             enabled, mode, max_per_minute = load_policy()
+        except (OSError, ValueError):
+            self.respond(503)
+            return
+        try:
             if enabled:
                 allowed = LIMITER.allow(ips[0], max_per_minute)
                 if not allowed and mode == "protect":
@@ -136,7 +141,7 @@ class PolicyHandler(BaseHTTPRequestHandler):
         except ValueError:
             self.respond(400)
             return
-        except (OSError, OverflowError, json.JSONDecodeError):
+        except OverflowError:
             self.respond(503)
             return
         self.respond(204)
@@ -147,7 +152,7 @@ class PolicyHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     SOCKET_FILE.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
-    if SOCKET_FILE.lexists():
+    if os.path.lexists(SOCKET_FILE):
         if not stat.S_ISSOCK(SOCKET_FILE.lstat().st_mode):
             raise ValueError("Refusing to replace a non-socket entry")
         SOCKET_FILE.unlink()
