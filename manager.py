@@ -31,6 +31,7 @@ RELEASE_MANIFEST_URL = "https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/
 RELEASE_SIGNATURE_URL = RELEASE_MANIFEST_URL + ".sig"
 PUBLIC_KEY_FILE = ROOT / "release.pub"
 PRIVATE_KEY_FILE = ROOT / "agent-key.pem"
+EDGE_POLICY_FILE = ROOT / "edge-policy" / "config.json"
 BACKUPS = ROOT / "backups"
 POLL_INTERVAL_SECONDS = 20
 MAX_INSTALLER_BYTES = 128 * 1024
@@ -52,7 +53,7 @@ def read_config(path: Path = CONFIG_FILE) -> dict:
 
 
 class RejectRedirect(urllib.request.HTTPRedirectHandler):
-    # Never replay long-lived bearer credentials across redirects.
+    # Never replay signed machine requests across HTTP redirects.
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
@@ -118,7 +119,7 @@ def backup_installation(root: Path = ROOT) -> Path:
     destination.mkdir(mode=0o700, exist_ok=True)
     backup = Path(tempfile.mkdtemp(prefix="pre-update-", dir=str(destination)))
     backup.chmod(0o700)
-    files = ("Caddyfile", "compose.yaml", "manager.py", "manager.json", "agent-key.pem",
+    files = ("Caddyfile", "compose.yaml", "manager.py", "manager.json", "agent-key.pem", "limiter.py",
              "release.pub", "release.json", "VERSION")
     for name in files:
         old = root / name
@@ -130,7 +131,7 @@ def backup_installation(root: Path = ROOT) -> Path:
 
 
 def restore_installation(backup: Path, root: Path = ROOT) -> None:
-    for name in ("Caddyfile", "compose.yaml", "manager.py", "manager.json", "agent-key.pem",
+    for name in ("Caddyfile", "compose.yaml", "manager.py", "manager.json", "agent-key.pem", "limiter.py",
                  "release.pub", "release.json", "VERSION"):
         saved = backup / name
         target = root / name
@@ -172,6 +173,27 @@ def signed_agent_headers(route: str, payload: bytes, key: Path = PRIVATE_KEY_FIL
         "X-XMesh-Sub-Nonce": nonce,
         "X-XMesh-Sub-Signature": signature.hex(),
     }
+
+
+def accept_edge_policy(config: dict, policy: object, path: Path = EDGE_POLICY_FILE) -> None:
+    """Commit only a bounded, authenticated policy from the Nexus poll reply."""
+    if not isinstance(policy, dict) or set(policy) != {"enabled", "mode", "ipPerMinute"}:
+        raise ValueError("Invalid Nexus edge policy")
+    enabled, mode, limit = policy["enabled"], policy["mode"], policy["ipPerMinute"]
+    if type(enabled) is not bool or mode not in ("monitor", "protect") or type(limit) is not int or not 1 <= limit <= 100_000:
+        raise ValueError("Invalid edge flood limit")
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, mode="w", encoding="utf-8", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+        try:
+            json.dump({"enabled": enabled, "mode": mode, "ipPerMinute": limit}, tmp)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            os.chmod(tmp_path, 0o644)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+    os.replace(tmp_path, path)
 
 
 def service_request(config: dict, route: str, body: dict) -> dict:
@@ -244,6 +266,9 @@ def current_version(path: Path = VERSION_FILE) -> str:
 def cycle(config: dict) -> bool:
     """Return True if updated, so systemd restarts the agent from newest file."""
     reply = service_request(config, "poll", {"version": current_version()})
+    # The signed Nexus policy must be present and valid on every poll.
+    # Never silently disable the local edge limit on missing/malformed data.
+    accept_edge_policy(config, reply["flood"])
     if reply.get("command") != "update":
         return False
     job = reply.get("jobId")
@@ -253,7 +278,7 @@ def cycle(config: dict) -> bool:
     try:
         perform_update(config)
     except Exception as error:
-        # Fixed message; never leak paths, headers, bearer tokens or subprocess args.
+        # Fixed message; never leak paths, signed request data or subprocess args.
         try:
             report(config, job, "failed", type(error).__name__[:50])
         except Exception:
