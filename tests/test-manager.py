@@ -22,6 +22,12 @@ class ManagerTest(unittest.TestCase):
             "domain": "sub.example.org",
             "path": "/s",
         }
+        self._policy_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._policy_tmp.cleanup)
+        self._policy_patch = patch.object(manager, "EDGE_POLICY_FILE", Path(self._policy_tmp.name) / "policy.json")
+        self._policy_patch.start()
+        self.addCleanup(self._policy_patch.stop)
+        self.flood = {"enabled": True, "mode": "protect", "ipPerMinute": 120}
 
     def test_config_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -46,14 +52,14 @@ class ManagerTest(unittest.TestCase):
 
     def test_unknown_command_is_ignored(self):
         with patch.object(manager, "service_request", return_value={
-            "command": "shell", "commandLine": "rm -rf /"
+            "command": "shell", "commandLine": "rm -rf /", "flood": self.flood
         }), patch.object(manager, "perform_update") as run:
             self.assertFalse(manager.cycle(self.config))
             run.assert_not_called()
 
     def test_update_uses_only_valid_job_id(self):
         with patch.object(manager, "service_request", return_value={
-            "command": "update", "jobId": "../../etc/passwd"
+            "command": "update", "jobId": "../../etc/passwd", "flood": self.flood
         }), patch.object(manager, "perform_update") as run:
             with self.assertRaises(ValueError):
                 manager.cycle(self.config)
@@ -61,7 +67,7 @@ class ManagerTest(unittest.TestCase):
 
     def test_update_reports_and_restores(self):
         with patch.object(manager, "service_request", return_value={
-            "command": "update", "jobId": "f" * 32
+            "command": "update", "jobId": "f" * 32, "flood": self.flood
         }), patch.object(manager, "perform_update") as run, patch.object(manager, "report") as report:
             self.assertTrue(manager.cycle(self.config))
             run.assert_called_once_with(self.config)
@@ -69,7 +75,7 @@ class ManagerTest(unittest.TestCase):
 
     def test_update_errors_fail_closed(self):
         with patch.object(manager, "service_request", return_value={
-            "command": "update", "jobId": "f" * 32
+            "command": "update", "jobId": "f" * 32, "flood": self.flood
         }), patch.object(manager, "perform_update", side_effect=OSError("secret in message")):
             with patch.object(manager, "report") as report:
                 self.assertFalse(manager.cycle(self.config))
@@ -128,6 +134,28 @@ class ManagerTest(unittest.TestCase):
             private.chmod(0o600)
             with self.assertRaises(ValueError):
                 manager.signed_agent_headers("unknown", payload, private)
+
+    def test_authenticated_poll_enforces_local_edge_policy(self):
+        with patch.object(manager, "service_request", return_value={
+            "command": "none", "flood": self.flood
+        }):
+            self.assertFalse(manager.cycle(self.config))
+            policy_file = manager.EDGE_POLICY_FILE
+            self.assertEqual(json.loads(policy_file.read_text()), self.flood)
+            self.assertEqual(policy_file.stat().st_mode & 0o777, 0o644)
+
+    def test_missing_or_corrupt_edge_policy_fails_closed(self):
+        for reply in [
+            {"command": "none"},
+            {"command": "none", "flood": {"enabled": True, "mode": "off", "ipPerMinute": 0}},
+            {"command": "none", "flood": {"enabled": True, "mode": "protect", "ipPerMinute": "120"}},
+        ]:
+            with patch.object(manager, "service_request", return_value=reply), patch.object(
+                manager, "perform_update"
+            ) as update:
+                with self.assertRaises((ValueError, KeyError)):
+                    manager.cycle(self.config)
+                update.assert_not_called()
 
     def test_ed25519_signed_manifest_and_tampering(self):
         with tempfile.TemporaryDirectory() as tmp:
