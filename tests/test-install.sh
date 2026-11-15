@@ -79,8 +79,17 @@ fi
 if printf '%s\n' invalid | bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --enroll-token-stdin --dry-run >/dev/null 2>&1; then
   echo 'ERROR: malformed stdin enrollment token was accepted' >&2; exit 1
 fi
-grep -Fq 'openssl pkeyutl -verify' install.sh
-grep -Fq 'release.json.sig' install.sh
+grep -Fq 'gh attestation verify' install.sh
+grep -Fq -- '--source-digest "$RELEASE_SHA"' install.sh
+grep -Fq -- '--cert-identity' install.sh
+grep -Fq 'release_verify.py' install.sh
+grep -Fq 'Refusing release downgrade' install.sh
+if grep -Fq 'release.json.sig' install.sh || grep -Fq 'signed_release(' manager.py; then
+  echo 'ERROR: legacy offline-manifest release authentication is still enabled' >&2
+  exit 1
+fi
+# No script may execute at root without an exact attested source commit.
+grep -Fq 'Use the automatically attested installer command from Nexus' install.sh
 grep -Fq 'ProtectKernelModules=true' install.sh
 grep -Fq 'NoNewPrivileges=true' install.sh
 grep -Fq 'xmesh-sub-manager.service' install.sh
