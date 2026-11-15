@@ -28,15 +28,28 @@ class ReleaseVerifyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             f=Path(d)/'install.sh'
             f.write_text('safe')
-            with patch.object(release,'ensure_gh'),patch.object(release.subprocess,'run') as call:
+            with patch.object(release,'ensure_gh'),patch.object(release,'public_bundles',return_value=[{'verificationMaterial':{},'dsseEnvelope':{}}]),patch.object(release.subprocess,'run') as call:
                 release.verify_file(f,sha)
                 args=call.call_args.args[0]
+                self.assertIn('--bundle',args)
+                self.assertNotIn('GH_TOKEN', ' '.join(args))
                 self.assertIn('--cert-identity',args)
                 self.assertEqual(args[args.index('--cert-identity')+1],release.CERT_IDENTITY)
                 self.assertEqual(args[args.index('--source-ref')+1],'refs/heads/main')
                 self.assertEqual(args[args.index('--source-digest')+1],sha)
                 self.assertIn('--deny-self-hosted-runners',args)
                 self.assertEqual(args[args.index('--repo')+1],release.REPO)
+
+    def test_untrusted_public_bundle_url_is_rejected(self):
+        sha='a'*40
+        with tempfile.TemporaryDirectory() as d:
+            file=Path(d)/'install.sh'
+            file.write_text('test')
+            with patch.object(release,'fetch_bytes',return_value=(
+                b'{"attestations":[{"bundle_url":"http://169.254.169.254/metadata"}]}'
+            )):
+                with self.assertRaises(ValueError):
+                    release.public_bundles(file)
 
     def test_reject_vulnerable_cli(self):
         for raw in ('gh version 2.45.0 (Ubuntu)\n','gh version 2.101.9\n','nonsense\n'):
