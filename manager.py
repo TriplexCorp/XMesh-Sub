@@ -160,6 +160,13 @@ def service_request(config: dict, route: str, body: dict) -> dict:
     url = config["panel"] + "/api/v1/sub-server/agent/" + route
     payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
     headers = signed_agent_headers(route, payload)
+    # Public (non-secret) key selects the exact Sub gateway identity in Nexus.
+    # The existing Ed25519 signature still proves private-key possession.
+    public_key = config.get("publicKey", "")
+    if public_key:
+        if not isinstance(public_key, str) or not re.fullmatch(r"[0-9a-f]{64}", public_key):
+            raise ValueError("Invalid pinned gateway public key")
+        headers["X-XMesh-Sub-Public-Key"] = public_key
     headers.update({"Content-Type": "application/json", "Accept": "application/json"})
     request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     with verified_open(request, timeout=20) as response:
