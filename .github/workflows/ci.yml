@@ -25,15 +25,11 @@ jobs:
         run: |
           bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --dry-run | sed -n '/^# Caddyfile$/,/^# compose.yaml$/p' | sed '1d;$d' > Caddyfile
           docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-      - name: Verify offline-signed release and exact build digests
+      - name: Verify keyless release security policy and negative cases
         run: |
-          base64 -d release.json.sig > release.sig.bin
-          openssl pkeyutl -verify -pubin -inkey release.pub -rawin -in release.json -sigfile release.sig.bin
-          python3 - <<'PY'
-          import hashlib,json,pathlib
-          manifest=json.loads(pathlib.Path('release.json').read_text())
-          assert manifest['schema']==1
-          assert manifest['version']==pathlib.Path('VERSION').read_text().strip()
-          for name,key in [('install.sh','installSha256'),('manager.py','managerSha256')]:
-              assert hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()==manifest[key], name
-          PY
+          python3 -m py_compile release_verify.py
+          python3 tests/test-release-verify.py
+          grep -Fq 'gh attestation verify' install.sh
+          grep -Fq 'stage_revision' manager.py
+          test "$(cat VERSION)" = "0.4.1"
+          ! grep -Fq 'release.json.sig' install.sh

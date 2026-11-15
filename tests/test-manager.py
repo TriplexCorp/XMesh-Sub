@@ -157,34 +157,11 @@ class ManagerTest(unittest.TestCase):
                     manager.cycle(self.config)
                 update.assert_not_called()
 
-    def test_ed25519_signed_manifest_and_tampering(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            key = Path(tmp) / "private.pem"
-            pub = Path(tmp) / "public.pem"
-            metadata = Path(tmp) / "release.json"
-            sig = Path(tmp) / "release.sig"
-            subprocess.run(["openssl", "genpkey", "-algorithm", "Ed25519", "-out", str(key)],
-                           check=True, capture_output=True)
-            subprocess.run(["openssl", "pkey", "-in", str(key), "-pubout", "-out", str(pub)],
-                           check=True, capture_output=True)
-            valid = {
-                "schema": 1, "version": "0.3.0",
-                "installSha256": "a" * 64, "managerSha256": "b" * 64,
-            }
-            metadata.write_text(json.dumps(valid, sort_keys=True, separators=(",", ":")))
-            subprocess.run(["openssl", "pkeyutl", "-sign", "-inkey", str(key),
-                            "-rawin", "-in", str(metadata), "-out", str(sig)],
-                           check=True, capture_output=True)
-            with patch.object(manager, "get_public_bytes", side_effect=[
-                metadata.read_bytes(), base64.b64encode(sig.read_bytes())
-            ]):
-                self.assertEqual(manager.signed_release(pub), valid)
-            poisoned = metadata.read_bytes().replace(b"0.3.0", b"9.9.9")
-            with patch.object(manager, "get_public_bytes", side_effect=[
-                poisoned, base64.b64encode(sig.read_bytes())
-            ]):
-                with self.assertRaises(subprocess.CalledProcessError):
-                    manager.signed_release(pub)
+    def test_release_trust_is_bound_to_exact_main_commit(self):
+        # Updater only delegates to the strictly pinned and attested verifier.
+        self.assertEqual(manager.release_verify.SOURCE_REF,'refs/heads/main')
+        self.assertIn('.github/workflows/attested-release.yml',
+                      manager.release_verify.CERT_IDENTITY)
 
     def test_backup_and_rollback_restore_original_configuration(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -205,17 +182,29 @@ class ManagerTest(unittest.TestCase):
             self.assertFalse((root / "VERSION").exists())
             self.assertEqual(run.call_args.args[0][0:2], ["docker", "compose"])
 
-    def test_update_requires_signed_digest_before_running_installer(self):
-        release = {"schema": 1, "version": "9.9.9",
-                   "installSha256": "0" * 64, "managerSha256": "1" * 64}
-        with (
-            patch.object(manager, "signed_release", return_value=release),
-            patch.object(manager, "get_public_bytes", return_value=b"#!/usr/bin/env bash\necho good\n"),
-            patch.object(manager.subprocess, "run") as execute,
-        ):
-            with self.assertRaises(ValueError):
+    def test_update_rejects_unattested_revision_before_execution(self):
+        with patch.object(manager.release_verify,'latest_source_sha',return_value='a'*40), \
+             patch.object(manager.release_verify,'stage_revision',
+                          side_effect=subprocess.CalledProcessError(1,'gh attestation verify')), \
+             patch.object(manager.subprocess,'run') as exec_script:
+            with self.assertRaises(subprocess.CalledProcessError):
                 manager.perform_update(self.config)
-            execute.assert_not_called()
+            exec_script.assert_not_called()
+
+    def test_update_blocks_attested_rollback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            version=Path(tmp)/'VERSION'
+            version.write_text('0.3.0\n')
+            install=Path(tmp)/'install.sh'
+            install.write_text('#!/usr/bin/env bash\n')
+            with patch.object(manager.release_verify,'latest_source_sha',return_value='b'*40), \
+                 patch.object(manager.release_verify,'stage_revision',return_value={
+                     'VERSION':version,'install.sh':install}), \
+                 patch.object(manager,'current_version',return_value='0.4.1'), \
+                 patch.object(manager.subprocess,'run') as exec_script:
+                with self.assertRaises(ValueError):
+                    manager.perform_update(self.config)
+                exec_script.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,73 @@
+name: Attested XMesh Sub release
+on:
+  push:
+    branches: [main]
+
+# Trusted publisher: not triggered by pull_request or workflow_dispatch.
+# GITHUB_TOKEN has no repository write access. It only uploads OIDC attestations
+# after deterministic tests pass. No long-lived private release keys exist.
+permissions:
+  contents: read
+
+concurrency:
+  group: sub-attest-main
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'TriplexCorp/XMesh-Sub' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Lint and integration tests
+        run: |
+          bash -n install.sh tests/test-install.sh
+          shellcheck -s bash install.sh tests/test-install.sh
+          bash tests/test-install.sh
+          python3 -m py_compile manager.py release_verify.py limiter.py
+          python3 tests/test-manager.py
+          python3 tests/test-limiter.py
+          python3 tests/test-release-verify.py
+      - name: Validate the actual generated gateway
+        run: |
+          bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --dry-run |
+            sed -n '/^# Caddyfile$/,/^# compose.yaml$/p' | sed '1d;$d' > Caddyfile
+          docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: Enforce immutable release contract
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          version=Path('VERSION').read_text().strip()
+          assert re.fullmatch(r'\d+\.\d+\.\d+', version)
+          assert tuple(map(int,version.split('.'))) >= (0,4,1)
+          for file in ('install.sh','manager.py','release_verify.py','VERSION'):
+              assert Path(file).is_file() and Path(file).stat().st_size > 0
+          assert 'gh attestation verify' in Path('install.sh').read_text()
+          assert 'release_verify.stage_revision' in Path('manager.py').read_text()
+          PY
+      - name: Publish keyless OIDC provenance for every executable release asset
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            install.sh
+            manager.py
+            release_verify.py
+            VERSION
+      - name: Verify exact attester workflow and main source revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for file in install.sh manager.py release_verify.py VERSION; do
+            gh attestation verify "$file" --repo TriplexCorp/XMesh-Sub \
+              --cert-identity "https://github.com/TriplexCorp/XMesh-Sub/.github/workflows/attested-release.yml@refs/heads/main" \
+              --source-ref refs/heads/main --source-digest "$GITHUB_SHA" \
+              --deny-self-hosted-runners
+          done

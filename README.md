@@ -10,9 +10,12 @@ Ubuntu 22.04/24.04 VPS and open TCP ports 80 and 443 (optional UDP 443).
 
 Copy the one-command managed installer from Subscription Studio after generating a
 one-time enrollment token. The command downloads a vetted, immutable installer,
-checks its SHA-256 before root execution and provides the enrollment token via
-a stdin here-document, not via command-line arguments. Do not paste the
-one-time token into shell history or support messages.
+installs the official GitHub CLI using a SHA-256-pinned APT signing keyring,
+then verifies the **exact installer** using short-lived GitHub Actions OIDC
+attestations (main release workflow, exact commit SHA, trusted issuer).
+Only then does it execute the installer as root, passing the one-time enrollment
+token through stdin rather than argv. Do not share the command: the pasted
+here-document itself contains a secret, and some terminals record pasted input.
 
 The installer installs Docker Engine and the Compose plugin if needed, validates the
 Caddy configuration, creates a persistent service under `/opt/xmesh-sub`, and obtains
@@ -34,9 +37,10 @@ Check service health after deployment:
     curl -fsSI https://sub.example.org/healthz
     cd /opt/xmesh-sub && sudo docker compose ps
 
-Upgrade:
-
-    cd /opt/xmesh-sub && sudo docker compose pull && sudo docker compose up -d
+Upgrade: click **Update Sub server** in Nexus Subscription Studio. The local
+agent fetches the immutable main commit and refuses unsigned, stale or otherwise
+unauthorized artifacts. Reinstalling Ubuntu or manually signing files is not
+part of the normal user workflow.
 
 ## Phase 1 implementation and guarantees
 
@@ -90,46 +94,48 @@ Future work can add pairing, fleet reporting, and independent subscription rende
 
 See [SECURITY.md](SECURITY.md).
 
-## Signed managed updates
+## Automatic, keyless attested releases (v0.4.1+)
 
-The management agent makes outbound-only HTTPS requests to Nexus. It accepts
-only the fixed `update` action, not arbitrary shell commands or URLs.
-The server owner generates a one-time enrollment code in Subscription Studio
-and copies a single command for installation and pairing.
-Enrollment creates a local Ed25519 private key and registers only its public key
-with Nexus. Every subsequent poll/report is signed with a timestamp, random nonce,
-route and exact body hash; old Bearer manager credentials are rejected.
-Clean re-enrollment is required for the strict final protocol.
+This is a **one-command clean VPS installation**. All release publishing happens
+automatically in `.github/workflows/attested-release.yml` on the protected
+`main` branch, **after** installer, Python and Caddy tests pass. GitHub Actions
+mints a short-lived OIDC signing certificate and publishes Sigstore attestations
+for `install.sh`, `manager.py`, `release_verify.py` and `VERSION`.
+There is **no static release private key** to generate, upload, or keep on the VPS.
 
-Every management update downloads the **offline-signed** `release.json`
-manifest and verifies its Ed25519 signature against a public trust anchor
-installed with the vetted initial installer. The installer SHA-256 in that
-manifest must match before any root execution; the installer similarly checks
-the exact SHA-256 of `manager.py`. Unsigned or modified main-branch files
-are **rejected**, not executed.
+Subscription Studio's generated command installs the official GitHub CLI (>=2.102),
+validates its package-signing keyring checksum, downloads an immutable commit and
+verifies the installer attestation before root execution. The installer independently
+re-verifies the installer, verifier, manager and version; it rejects outdated
+revisions, missing attestations, unexpected workflow identities or a failed
+lookup. The manager uses the same exact-commit verification for every update.
 
-To sign a new vetted release, keep the private signing key OFF GitHub and the
-VPS, increment VERSION, and from a trusted signing workstation run
-`tools/sign-release.sh /secure/offline-ed25519-private.pem`. Review the
-manifest and commit `release.json` and `release.json.sig` with the code.
-Never commit the private key. CI verifies the signature and hashes.
+The management agent **separately** generates its Ed25519 private identity on the
+Sub VPS; this private key is never a release signing key and is never sent to
+Nexus. Each poll/report is signed with timestamp, nonce, fixed route and body hash.
+Legacy bearer manager authentication has been removed.
 
-The agent stores recovery snapshots under `/opt/xmesh-sub/backups`
-with root-only permissions and attempts to restore the old gateway configuration
-if an update fails. Full OS-package rollback is not guaranteed. The root
-systemd agent has additional protection flags, but still possesses root
-privileges to install and update Docker/Compose. For production, keep the
-VPS and panel patched and review each signed release.
+**Security prerequisite:** Protect the release workflow and `main` with branch
+protection/reviews and restricted Actions permissions. Otherwise a compromised
+publisher can produce attestations for malicious code; signatures alone do not
+prove the code is safe. The first real VPS deployment and update must be tested
+after the workflow has published attestations.
+
+Recovery snapshots are stored under `/opt/xmesh-sub/backups` with root-only
+permissions, including the installed verifier and commit SHA. A failed update
+attempts a best-effort rollback (not OS package rollback). The manager requires
+root to install Docker; systemd hardening reduces but cannot eliminate impact
+of total host compromise.
 
 To inspect the agent:
 
     sudo systemctl status xmesh-sub-manager
     sudo journalctl -u xmesh-sub-manager -n 50 --no-pager
 
-Only one managed Sub server is supported per Nexus installation.
+Only one managed Sub server per Nexus installation is supported.
 
-## Peer-IP flood defense — staged v0.4.0
+## Peer-IP flood defense
 
-The staged installer embeds an audited Python limiter into the **offline-signed installer** (never downloaded as an unsigned executable). A separate unprivileged container listens only on a private Unix-domain socket. Caddy overwrites the limiter request's peer-IP header with its own connection peer (`{remote_host}`) and strips all original request headers, URI and cookies from the authorization request. No subscriber bearer token enters the limiter. The limiter normalizes IPv4-mapped IPv6 and groups native IPv6 by /64, maintains bounded HMAC-keyed token buckets and bounds active worker threads. Protected mode returns 429 with `Retry-After` for over-budget requests; missing/invalid policy or limiter outages fail closed.
+The attested installer embeds an audited Python limiter into the **verified installer** (never downloaded as an unsigned executable). A separate unprivileged container listens only on a private Unix-domain socket. Caddy overwrites the limiter request's peer-IP header with its own connection peer (`{remote_host}`) and strips all original request headers, URI and cookies from the authorization request. No subscriber bearer token enters the limiter. The limiter normalizes IPv4-mapped IPv6 and groups native IPv6 by /64, maintains bounded HMAC-keyed token buckets and bounds active worker threads. Protected mode returns 429 with `Retry-After` for over-budget requests; missing/invalid policy or limiter outages fail closed.
 
-**Release blocker:** These source files are not deployable until the offline Ed25519 signing owner reviews the changes, generates the matching v0.4.0 `release.json` and `release.json.sig` using the existing trust anchor and CI verifies exact digests. Do not disable signature checks. Also prevent bypass of the Sub gateway by fetching a subscription directly from the Nexus panel origin, and verify kernel-level peer identity in the chosen Docker/CDN topology before production rollout.
+**Remaining release validation:** Confirm the authenticated release workflow has published OIDC attestations, run a clean-VPS canary and verify real peer IP from Caddy/Docker. Prevent bypass of the Sub limiter by fetching a subscription directly from the Nexus public panel origin. Neither the attestation nor the flood limiter alone solves CDN/origin bypass.
