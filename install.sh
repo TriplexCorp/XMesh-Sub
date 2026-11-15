@@ -425,21 +425,21 @@ fi
 # and the immutable commit, not merely to GitHub's mutable main branch.
 command -v gh >/dev/null || die "Install the official GitHub CLI using the Nexus installer command"
 command -v python3 >/dev/null || die "Python 3 is required for release verification"
-read -r _ gh_major gh_minor gh_patch _ < <(gh version | head -n1 | sed -E 's/^gh version ([0-9]+)[.]([0-9]+)[.]([0-9]+).*$/gh \\1 \\2 \\3/')
-[[ "$gh_major" =~ ^[0-9]+$ && "$gh_minor" =~ ^[0-9]+$ && "$gh_patch" =~ ^[0-9]+$ ]] ||
-  die "Invalid GitHub CLI version"
+read -r _ _ gh_version _ < <(gh version | head -n1)
+[[ "$gh_version" =~ ^([0-9]+)[.]([0-9]+)[.]([0-9]+)$ ]] || die "Invalid GitHub CLI version"
+gh_major=${BASH_REMATCH[1]} gh_minor=${BASH_REMATCH[2]} gh_patch=${BASH_REMATCH[3]}
 (( gh_major > 2 || (gh_major == 2 && (gh_minor > 102 || (gh_minor == 102 && gh_patch >= 0))) )) ||
   die "GitHub CLI 2.102.0+ is required to verify release provenance"
 verify_artifact() {
-  gh attestation verify "$1" --repo TriplexCorp/XMesh-Sub \\
-    --cert-identity 'https://github.com/TriplexCorp/XMesh-Sub/.github/workflows/attested-release.yml@refs/heads/main' \\
-    --source-ref refs/heads/main --source-digest "$RELEASE_SHA" \\
+  gh attestation verify "$1" --repo TriplexCorp/XMesh-Sub \
+    --cert-identity 'https://github.com/TriplexCorp/XMesh-Sub/.github/workflows/attested-release.yml@refs/heads/main' \
+    --source-ref refs/heads/main --source-digest "$RELEASE_SHA" \
     --deny-self-hosted-runners >/dev/null ||
     die "Untrusted release artifact; refused root execution"
 }
 verify_artifact "${BASH_SOURCE[0]}"
-curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 8 --max-time 35 \\
-  "https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/$RELEASE_SHA/release_verify.py" \\
+curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 8 --max-time 35 \
+  "https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/$RELEASE_SHA/release_verify.py" \
   -o "$temp/release_verify.py" || die "Could not download provenance verifier"
 verify_artifact "$temp/release_verify.py"
 mkdir -m 700 "$temp/revision"
@@ -455,7 +455,7 @@ new=pathlib.Path(sys.argv[1]).read_text().strip()
 old_file=pathlib.Path(sys.argv[2])
 old=old_file.read_text().strip() if old_file.is_file() else '0.0.0'
 def semver(s):
-    if not re.fullmatch(r'\\d+\\.\\d+\\.\\d+',s):
+    if not re.fullmatch(r'\d+\.\d+\.\d+',s):
         raise SystemExit("Invalid release version")
     return tuple(map(int,s.split('.')))
 if semver(new)<semver(old):
