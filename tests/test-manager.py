@@ -21,7 +21,6 @@ class ManagerTest(unittest.TestCase):
             "panel": "https://panel.example.org",
             "domain": "sub.example.org",
             "path": "/s",
-            "agentToken": "a" * 64,
         }
 
     def test_config_validation(self):
@@ -29,12 +28,15 @@ class ManagerTest(unittest.TestCase):
             file = Path(tmp) / "config.json"
             file.write_text(json.dumps(self.config))
             self.assertEqual(manager.read_config(file), self.config)
+            file.write_text(json.dumps({**self.config, "agentToken": "a" * 64}))
+            with self.assertRaises(ValueError):
+                manager.read_config(file)
+            file.write_text(json.dumps(self.config))
             for key, bad in [
                 ("panel", "http://panel.example.org"),
                 ("panel", "https://panel.example.org@evil.net"),
                 ("domain", "sub.example.org;curl"),
-                ("path", "/s;rm"),
-                ("agentToken", "short")
+                ("path", "/s;rm")
             ]:
                 config = dict(self.config)
                 config[key] = bad
@@ -78,9 +80,54 @@ class ManagerTest(unittest.TestCase):
     def test_redirects_are_rejected_even_with_authorization(self):
         from urllib.request import Request
         request = Request("https://panel.example.org/api/v1/sub-server/agent/poll",
-                          headers={"Authorization": "Bearer " + "a" * 64})
+                          headers={"X-XMesh-Sub-Signature": "a" * 128})
         self.assertIsNone(manager.RejectRedirect().redirect_request(
             request, None, 302, "Moved", {}, "https://evil.example.org"))
+
+    def test_agent_signatures_bind_route_time_nonce_and_body(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp) / "agent-key.pem"
+            public = Path(tmp) / "public.pem"
+            subprocess.run(["openssl", "genpkey", "-algorithm", "Ed25519",
+                            "-out", str(private)], check=True, capture_output=True)
+            private.chmod(0o600)
+            subprocess.run(["openssl", "pkey", "-in", str(private),
+                            "-pubout", "-out", str(public)],
+                           check=True, capture_output=True)
+            payload = b'{"version":"1.0.0"}'
+            h = manager.signed_agent_headers("poll", payload, private)
+            self.assertEqual(set(h), {
+                "X-XMesh-Sub-Timestamp", "X-XMesh-Sub-Nonce",
+                "X-XMesh-Sub-Signature"
+            })
+            canonical = (
+                "XMESH-SUB1\nPOST\n/api/v1/sub-server/agent/poll\n"
+                + h["X-XMesh-Sub-Timestamp"] + "\n"
+                + h["X-XMesh-Sub-Nonce"] + "\n"
+                + hashlib.sha256(payload).hexdigest() + "\n"
+            ).encode("ascii")
+            message = Path(tmp) / "canonical"
+            signature = Path(tmp) / "signature"
+            message.write_bytes(canonical)
+            signature.write_bytes(bytes.fromhex(h["X-XMesh-Sub-Signature"]))
+            def verify():
+                return subprocess.run([
+                    "openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(public),
+                    "-rawin", "-in", str(message), "-sigfile", str(signature)
+                ], capture_output=True).returncode
+            self.assertEqual(verify(), 0)
+            message.write_bytes(canonical.replace(b"/agent/poll\n", b"/agent/report\n"))
+            self.assertNotEqual(verify(), 0)
+            message.write_bytes(canonical.replace(hashlib.sha256(payload).hexdigest().encode(),
+                                                  hashlib.sha256(b"{}").hexdigest().encode()))
+            self.assertNotEqual(verify(), 0)
+            private.chmod(0o644)
+            with self.assertRaises(PermissionError):
+                manager.signed_agent_headers("poll", payload, private)
+            private.chmod(0o600)
+            with self.assertRaises(ValueError):
+                manager.signed_agent_headers("unknown", payload, private)
 
     def test_ed25519_signed_manifest_and_tampering(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -115,15 +162,18 @@ class ManagerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "compose.yaml").write_text("services: original")
-            (root / "manager.json").write_text("original service credential")
+            (root / "manager.json").write_text("original server settings")
+            (root / "agent-key.pem").write_text("original private key")
             backup = manager.backup_installation(root)
             (root / "compose.yaml").write_text("services: broken")
             (root / "manager.json").unlink()
+            (root / "agent-key.pem").write_text("tampered")
             (root / "VERSION").write_text("9.9.9")
             with patch.object(manager.subprocess, "run") as run:
                 manager.restore_installation(backup, root)
             self.assertEqual((root / "compose.yaml").read_text(), "services: original")
-            self.assertEqual((root / "manager.json").read_text(), "original service credential")
+            self.assertEqual((root / "manager.json").read_text(), "original server settings")
+            self.assertEqual((root / "agent-key.pem").read_text(), "original private key")
             self.assertFalse((root / "VERSION").exists())
             self.assertEqual(run.call_args.args[0][0:2], ["docker", "compose"])
 
