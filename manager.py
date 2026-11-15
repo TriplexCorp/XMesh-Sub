@@ -7,7 +7,6 @@ There is no management listener, public admin endpoint, or Docker socket exposed
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import os
@@ -18,6 +17,8 @@ import shutil
 import ssl
 import subprocess
 import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import release_verify
 import tempfile
 import time
 import urllib.error
@@ -26,10 +27,7 @@ import urllib.request
 ROOT = Path("/opt/xmesh-sub")
 CONFIG_FILE = ROOT / "manager.json"
 VERSION_FILE = ROOT / "VERSION"
-SCRIPT_URL = "https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/install.sh"
-RELEASE_MANIFEST_URL = "https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/release.json"
-RELEASE_SIGNATURE_URL = RELEASE_MANIFEST_URL + ".sig"
-PUBLIC_KEY_FILE = ROOT / "release.pub"
+RELEASE_SHA_FILE = ROOT / "RELEASE_SHA"
 PRIVATE_KEY_FILE = ROOT / "agent-key.pem"
 EDGE_POLICY_FILE = ROOT / "edge-policy" / "config.json"
 BACKUPS = ROOT / "backups"
@@ -68,47 +66,6 @@ def verified_open(request: urllib.request.Request, *, timeout: int = 20):
     return opener.open(request, timeout=timeout)
 
 
-def get_public_bytes(url: str, max_bytes: int = 128 * 1024) -> bytes:
-    request = urllib.request.Request(url, headers={"Accept": "application/octet-stream"})
-    with verified_open(request, timeout=30) as response:
-        data = response.read(max_bytes + 1)
-    if len(data) > max_bytes:
-        raise ValueError("Oversized release asset")
-    return data
-
-
-def signed_release(public_key: Path = PUBLIC_KEY_FILE) -> dict:
-    """Reject all updates unless an offline-signed release manifest is valid."""
-    metadata = get_public_bytes(RELEASE_MANIFEST_URL, 4096)
-    signature_b64 = get_public_bytes(RELEASE_SIGNATURE_URL, 512)
-    signature = base64.b64decode(signature_b64.strip(), validate=True)
-    if len(signature) != 64:
-        raise ValueError("Invalid Ed25519 signature size")
-    if not public_key.is_file():
-        raise ValueError("Release signing trust anchor is missing")
-    with tempfile.TemporaryDirectory(prefix="xmesh-sub-verify-") as folder:
-        manifest = Path(folder) / "release.json"
-        sig = Path(folder) / "release.sig"
-        manifest.write_bytes(metadata)
-        sig.write_bytes(signature)
-        subprocess.run([
-            "openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(public_key),
-            "-rawin", "-in", str(manifest), "-sigfile", str(sig),
-        ], check=True, timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    payload = json.loads(metadata)
-    if (not isinstance(payload, dict) or set(payload) != {
-            "schema", "version", "installSha256", "managerSha256"}
-            or payload["schema"] != 1
-            or not isinstance(payload["version"], str)
-            or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", payload["version"])):
-        raise ValueError("Invalid signed release manifest")
-    for key in ("installSha256", "managerSha256"):
-        digest = payload[key]
-        if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
-            raise ValueError("Invalid signed release digest")
-    return payload
-
-
 def version_tuple(version: str) -> tuple[int, int, int]:
     match = re.match(r"^(\d+)\.(\d+)\.(\d+)", version)
     return tuple(map(int, match.groups())) if match else (0, 0, 0)
@@ -120,7 +77,7 @@ def backup_installation(root: Path = ROOT) -> Path:
     backup = Path(tempfile.mkdtemp(prefix="pre-update-", dir=str(destination)))
     backup.chmod(0o700)
     files = ("Caddyfile", "compose.yaml", "manager.py", "manager.json", "agent-key.pem", "limiter.py",
-             "release.pub", "release.json", "VERSION")
+             "release_verify.py", "RELEASE_SHA", "VERSION")
     for name in files:
         old = root / name
         if old.is_file():
@@ -132,7 +89,7 @@ def backup_installation(root: Path = ROOT) -> Path:
 
 def restore_installation(backup: Path, root: Path = ROOT) -> None:
     for name in ("Caddyfile", "compose.yaml", "manager.py", "manager.json", "agent-key.pem", "limiter.py",
-                 "release.pub", "release.json", "VERSION"):
+                 "release_verify.py", "RELEASE_SHA", "VERSION"):
         saved = backup / name
         target = root / name
         if saved.is_file():
@@ -224,28 +181,26 @@ def report(config: dict, job: str, stage: str, detail: str = "") -> None:
 
 
 def perform_update(config: dict) -> None:
-    # Nexus only triggers a fixed action. Artifacts MUST match an Ed25519-
-    # authenticated manifest signed by the offline owner key, never GitHub alone.
-    release = signed_release()
-    if version_tuple(release["version"]) < version_tuple(current_version()):
-        raise ValueError("Refusing a signed release rollback")
-    script = get_public_bytes(SCRIPT_URL, MAX_INSTALLER_BYTES)
-    if (not script.startswith(b"#!/usr/bin/env bash\n")
-            or hashlib.sha256(script).hexdigest() != release["installSha256"]):
-        raise ValueError("Installer SHA-256 is not approved by the release signer")
+    # Only the main branch's trusted OIDC release workflow can publish root code.
+    # Both installer and manager are attested for the exact Git commit. This
+    # verification is done again inside the installer (defense in depth).
+    sha = release_verify.latest_source_sha()
     with tempfile.TemporaryDirectory(prefix="xmesh-sub-update-") as location:
-        file = Path(location) / "install.sh"
-        file.write_bytes(script)
-        file.chmod(0o700)
-        subprocess.run(["bash", "-n", str(file)], check=True, timeout=10,
+        assets = release_verify.stage_revision(sha, Path(location))
+        version = assets["VERSION"].read_text("ascii").strip()
+        if version_tuple(version) < version_tuple(current_version()):
+            raise ValueError("Refusing an attested release rollback")
+        script = assets["install.sh"]
+        if not script.read_bytes().startswith(b"#!/usr/bin/env bash\n"):
+            raise ValueError("Unexpected installer format")
+        subprocess.run(["bash", "-n", str(script)], check=True, timeout=10,
                        stdout=subprocess.DEVNULL)
         backup = backup_installation()
-        # Only constant flags and validated saved config are ever forwarded.
         try:
             subprocess.run([
-                "bash", str(file), "--panel", config["panel"],
+                "bash", str(script), "--panel", config["panel"],
                 "--domain", config["domain"], "--path", config["path"],
-                "--skip-manager-restart",
+                "--release-sha", sha, "--skip-manager-restart",
             ], check=True, timeout=900, stdout=subprocess.DEVNULL)
         except Exception as original:
             try:
