@@ -18,10 +18,12 @@ for wrong in \
 done
 grep -Fq 'read -r -s ENROLL_TOKEN </dev/tty' bootstrap.sh
 grep -Fq -- '--enroll-token-stdin' bootstrap.sh
+# shellcheck disable=SC2016 # literal source assertion
 grep -Fq -- '--source-digest "$sha"' bootstrap.sh
 grep -Fq -- '--cert-identity' bootstrap.sh
 grep -Fq -- '--deny-self-hosted-runners' bootstrap.sh
 grep -Fq "sha256sum --check --status" bootstrap.sh
-! grep -Fq -- '--enroll-token "$ENROLL_TOKEN"' bootstrap.sh
-! grep -Fq 'gh auth login' bootstrap.sh
+# shellcheck disable=SC2016 # literal source assertion
+if grep -Fq -- '--enroll-token "$ENROLL_TOKEN"' bootstrap.sh; then echo 'Credential leaked into argv' >&2; exit 1; fi
+if grep -Fq 'gh auth login' bootstrap.sh; then echo 'Interactive GitHub authentication forbidden' >&2; exit 1; fi
 echo 'Immutable short bootstrap, TTY-only enrollment and OIDC checks passed'
