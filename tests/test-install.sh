@@ -80,6 +80,7 @@ if printf '%s\n' invalid | bash install.sh --panel https://panel.example.org --d
   echo 'ERROR: malformed stdin enrollment token was accepted' >&2; exit 1
 fi
 grep -Fq 'gh attestation verify' install.sh
+# shellcheck disable=SC2016  # literal source-code assertion, not expansion
 grep -Fq -- '--source-digest "$RELEASE_SHA"' install.sh
 grep -Fq -- '--cert-identity' install.sh
 grep -Fq 'release_verify.py' install.sh
