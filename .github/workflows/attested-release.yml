@@ -28,9 +28,10 @@ jobs:
           persist-credentials: false
       - name: Lint and integration tests
         run: |
-          bash -n install.sh tests/test-install.sh
-          shellcheck -s bash install.sh tests/test-install.sh
+          bash -n install.sh bootstrap.sh tests/test-install.sh tests/test-bootstrap.sh
+          shellcheck -s bash install.sh bootstrap.sh tests/test-install.sh tests/test-bootstrap.sh
           bash tests/test-install.sh
+          bash tests/test-bootstrap.sh
           python3 -m py_compile manager.py release_verify.py limiter.py
           python3 tests/test-manager.py
           python3 tests/test-limiter.py
@@ -48,7 +49,7 @@ jobs:
           version=Path('VERSION').read_text().strip()
           assert re.fullmatch(r'\d+\.\d+\.\d+', version)
           assert tuple(map(int,version.split('.'))) >= (0,4,1)
-          for file in ('install.sh','manager.py','release_verify.py','VERSION'):
+          for file in ('install.sh','bootstrap.sh','manager.py','release_verify.py','VERSION'):
               assert Path(file).is_file() and Path(file).stat().st_size > 0
           assert 'gh attestation verify' in Path('install.sh').read_text()
           assert 'release_verify.stage_revision' in Path('manager.py').read_text()
@@ -58,6 +59,7 @@ jobs:
         with:
           subject-path: |
             install.sh
+            bootstrap.sh
             manager.py
             release_verify.py
             VERSION
@@ -65,7 +67,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          for file in install.sh manager.py release_verify.py VERSION; do
+          for file in install.sh bootstrap.sh manager.py release_verify.py VERSION; do
             gh attestation verify "$file" --repo TriplexCorp/XMesh-Sub \
               --cert-identity "https://github.com/TriplexCorp/XMesh-Sub/.github/workflows/attested-release.yml@refs/heads/main" \
               --source-ref refs/heads/main --source-digest "$GITHUB_SHA" \
