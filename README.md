@@ -96,6 +96,10 @@ The management agent makes outbound-only HTTPS requests to Nexus. It accepts
 only the fixed `update` action, not arbitrary shell commands or URLs.
 The server owner generates a one-time enrollment code in Subscription Studio
 and copies a single command for installation and pairing.
+Enrollment creates a local Ed25519 private key and registers only its public key
+with Nexus. Every subsequent poll/report is signed with a timestamp, random nonce,
+route and exact body hash; old Bearer manager credentials are rejected.
+Clean re-enrollment is required for the strict final protocol.
 
 Every management update downloads the **offline-signed** `release.json`
 manifest and verifies its Ed25519 signature against a public trust anchor
