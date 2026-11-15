@@ -8,6 +8,7 @@ There is no management listener, public admin endpoint, or Docker socket exposed
 from __future__ import annotations
 
 import base64
+import stat
 import hashlib
 import json
 import os
@@ -29,6 +30,8 @@ SCRIPT_URL = "https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/insta
 RELEASE_MANIFEST_URL = "https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/release.json"
 RELEASE_SIGNATURE_URL = RELEASE_MANIFEST_URL + ".sig"
 PUBLIC_KEY_FILE = ROOT / "release.pub"
+AGENT_PROOF_KEY = ROOT / "agent-proof.pem"
+EDGE_POLICY_FILE = ROOT / "edge-policy" / "config.json"
 BACKUPS = ROOT / "backups"
 POLL_INTERVAL_SECONDS = 20
 MAX_INSTALLER_BYTES = 128 * 1024
@@ -46,6 +49,13 @@ def read_config(path: Path = CONFIG_FILE) -> dict:
             or not isinstance(domain, str) or not re.fullmatch(r"[A-Za-z0-9.-]+", domain)
             or not isinstance(sub_path, str) or not re.fullmatch(r"/[A-Za-z0-9_/-]+", sub_path)):
         raise ValueError("Invalid manager configuration")
+    proof = config.get("proofKey")
+    if proof is not None:
+        if proof != str(AGENT_PROOF_KEY) or not AGENT_PROOF_KEY.is_file():
+            raise ValueError("Invalid agent proof key path")
+        info = AGENT_PROOF_KEY.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+            raise ValueError("Agent proof key permissions must be 0600")
     return config
 
 
@@ -117,7 +127,7 @@ def backup_installation(root: Path = ROOT) -> Path:
     backup = Path(tempfile.mkdtemp(prefix="pre-update-", dir=str(destination)))
     backup.chmod(0o700)
     files = ("Caddyfile", "compose.yaml", "manager.py", "manager.json",
-             "release.pub", "release.json", "VERSION")
+             "agent-proof.pem", "limiter.py", "release.pub", "release.json", "VERSION")
     for name in files:
         old = root / name
         if old.is_file():
@@ -129,7 +139,7 @@ def backup_installation(root: Path = ROOT) -> Path:
 
 def restore_installation(backup: Path, root: Path = ROOT) -> None:
     for name in ("Caddyfile", "compose.yaml", "manager.py", "manager.json",
-                 "release.pub", "release.json", "VERSION"):
+                 "agent-proof.pem", "limiter.py", "release.pub", "release.json", "VERSION"):
         saved = backup / name
         target = root / name
         if saved.is_file():
@@ -140,17 +150,64 @@ def restore_installation(backup: Path, root: Path = ROOT) -> None:
                     "up", "-d", "--remove-orphans"], cwd=root, check=True, timeout=180)
 
 
+def proof_headers(config: dict, route: str, wire: bytes, key_file: Path = AGENT_PROOF_KEY) -> dict:
+    """Sign exact request bytes. Bearer+private key are both required."""
+    ts = str(int(time.time()))
+    nonce = os.urandom(16).hex()
+    path = "/api/v1/sub-server/agent/" + route
+    token_hash = hashlib.sha256(config["agentToken"].encode("ascii")).hexdigest()
+    body_hash = hashlib.sha256(wire).hexdigest()
+    message = "\\n".join((
+        "xmesh-sub-proof-v1", token_hash, "POST", path, ts, nonce, body_hash,
+    )).encode("ascii")
+    # OpenSSL Ed25519 pkeyutl requires seekable input (-rawin).
+    with tempfile.NamedTemporaryFile(prefix="xmesh-sub-proof-") as tmp:
+        tmp.write(message)
+        tmp.flush()
+        signature = subprocess.run([
+            "openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(key_file),
+            "-in", tmp.name,
+        ], check=True, capture_output=True, timeout=10).stdout
+    if len(signature) != 64:
+        raise ValueError("Invalid Ed25519 signature from local signer")
+    return {
+        "X-XMesh-Proof-Ts": ts,
+        "X-XMesh-Proof-Nonce": nonce,
+        "X-XMesh-Proof-Sig": signature.hex(),
+    }
+
+
+def accept_edge_policy(config: dict, policy: object, path: Path = EDGE_POLICY_FILE) -> None:
+    """Commit only a bounded, authenticated policy from the Nexus poll reply."""
+    if not isinstance(policy, dict) or set(policy) != {"enabled", "mode", "ipPerMinute"}:
+        raise ValueError("Invalid Nexus edge policy")
+    enabled, mode, limit = policy["enabled"], policy["mode"], policy["ipPerMinute"]
+    if type(enabled) is not bool or mode not in ("monitor", "protect") or type(limit) is not int or not 1 <= limit <= 100_000:
+        raise ValueError("Invalid edge flood limit")
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, mode="w", encoding="utf-8", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+        try:
+            json.dump({"enabled": enabled, "mode": mode, "ipPerMinute": limit}, tmp)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            os.chmod(tmp_path, 0o644)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+    os.replace(tmp_path, path)
+
+
 def service_request(config: dict, route: str, body: dict) -> dict:
     # route is fixed in source code, never server-controlled.
     url = config["panel"] + "/api/v1/sub-server/agent/" + route
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(body, separators=(",", ":")).encode("utf-8"),
-        headers={"Authorization": "Bearer " + config["agentToken"],
-                 "Content-Type": "application/json",
-                 "Accept": "application/json"},
-        method="POST",
-    )
+    wire = json.dumps(body, separators=(",", ":")).encode("utf-8")
+    headers = {"Authorization": "Bearer " + config["agentToken"],
+               "Content-Type": "application/json",
+               "Accept": "application/json"}
+    if config.get("proofKey"):
+        headers.update(proof_headers(config, route, wire))
+    request = urllib.request.Request(url, data=wire, headers=headers, method="POST")
     with verified_open(request, timeout=20) as response:
         payload = response.read(16384 + 1)
         if len(payload) > 16384:
@@ -212,6 +269,10 @@ def current_version(path: Path = VERSION_FILE) -> str:
 def cycle(config: dict) -> bool:
     """Return True if updated, so systemd restarts the agent from newest file."""
     reply = service_request(config, "poll", {"version": current_version()})
+    # Before processing commands, persist signed Nexus flood policy for the
+    # local Caddy socket-auth gate. Invalid policy never disables protection.
+    if "flood" in reply:
+        accept_edge_policy(config, reply["flood"])
     if reply.get("command") != "update":
         return False
     job = reply.get("jobId")
