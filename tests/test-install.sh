@@ -10,6 +10,20 @@ fail_expected() {
 out=$(bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --dry-run)
 grep -Fq 'path_regexp ^(/s|/sub|/portal)/[0-9a-f]{64}$' <<< "$out"
 grep -Fq 'reverse_proxy https://panel.example.org' <<< "$out"
+grep -Fq 'forward_auth unix//run/xmesh-sub/rate.sock' <<< "$out"
+grep -Fq 'header_up X-XMesh-Peer-IP {remote_host}' <<< "$out"
+grep -Fq 'header_up -*' <<< "$out"
+grep -Fq 'header_up -X-Forwarded-Uri' <<< "$out"
+grep -Fq 'header_up -Authorization' <<< "$out"
+grep -Fq 'header_up -Cookie' <<< "$out"
+grep -Fq 'xmesh-sub-limiter:' <<< "$out"
+grep -Fq './run:/run/xmesh-sub:ro' <<< "$out"
+# The signed installer embeds the exact, audited limiter source, no unsigned
+# source fetch or module download is permitted on the Sub VPS.
+tmp_limiter=$(mktemp)
+trap 'rm -f "$tmp_limiter"' EXIT
+sed -n '/^# limiter.py$/,$p' <<< "$out" | sed '1d' >"$tmp_limiter"
+cmp -s limiter.py "$tmp_limiter" || { echo 'ERROR: signed installer limiter differs from source' >&2; exit 1; }
 # The standard proxy must retain origin subscription metadata, including
 # profile-web-page-url and support-url. The personal webpage points to the
 # same allowlisted /s/{token} route with ?view=portal.
@@ -77,4 +91,10 @@ if grep -Fq 'agentToken' install.sh || grep -Fq 'agentToken' manager.py; then
   echo 'ERROR: legacy bearer authentication must be removed' >&2; exit 1
 fi
 grep -Fq 'SKIP_MANAGER_RESTART' install.sh
+# The embedded limiter must EXACTLY match the reviewed standalone source.
+python3 - <<'PY'
+from pathlib import Path
+source=Path('install.sh').read_text().split("  cat <<'XMESH_LIMITER_SOURCE'\n",1)[1].split("\nXMESH_LIMITER_SOURCE",1)[0]
+assert source.rstrip('\n')+'\n' == Path('limiter.py').read_text(), 'Limiter embedded in installer differs from tested source'
+PY
 echo 'Installer validation tests passed'
