@@ -567,6 +567,21 @@ if [[ -s "$temp/manager.py" ]]; then
     install -m 600 "$temp/agent-key.pem" "$ROOT/agent-key.pem"
     install -m 600 "$temp/manager.json" "$ROOT/manager.json"
   fi
+  # Fail before reporting enrollment success if the deployed manager cannot
+  # parse the exact configuration schema produced by this installer.
+  if [[ -s "$ROOT/manager.json" ]]; then
+    python3 - "$ROOT" <<'PY' ||
+import importlib.util
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("xmesh_sub_manager", root / "manager.py")
+manager = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(manager)
+manager.read_config(root / "manager.json")
+PY
+      die "Management agent configuration preflight failed; service was not restarted"
+  fi
   # Fixed systemd service, no inbound ports. Ed25519 identity stays in a
   # root-only PEM; the JSON file contains only non-secret connection settings.
   cat >"$temp/xmesh-sub-manager.service" <<'UNIT'

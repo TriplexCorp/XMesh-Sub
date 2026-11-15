@@ -45,8 +45,16 @@ def read_config(path: Path = CONFIG_FILE) -> dict:
             or not isinstance(domain, str) or not re.fullmatch(r"[A-Za-z0-9.-]+", domain)
             or not isinstance(sub_path, str) or not re.fullmatch(r"/[A-Za-z0-9_/-]+", sub_path)):
         raise ValueError("Invalid manager configuration")
-    if set(config) != {"panel", "domain", "path"}:
+    # The attested installer records the Ed25519 public identity of this
+    # gateway alongside its three routing fields. Reject arbitrary fields or
+    # malformed selectors, but accept legacy primary agents without a selector.
+    required = {"panel", "domain", "path"}
+    if not required.issubset(config) or set(config) - (required | {"publicKey"}):
         raise ValueError("Unexpected manager configuration fields")
+    if "publicKey" in config:
+        public_key = config["publicKey"]
+        if not isinstance(public_key, str) or not re.fullmatch(r"[0-9a-f]{64}", public_key):
+            raise ValueError("Invalid pinned gateway public key")
     return config
 
 
