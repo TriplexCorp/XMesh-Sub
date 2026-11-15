@@ -71,3 +71,20 @@ jobs:
               --source-ref refs/heads/main --source-digest "$GITHUB_SHA" \
               --deny-self-hosted-runners
           done
+
+      - name: Prove anonymous clean-VPS verification works (no token/login)
+        # This tests the PUBLIC API + Sigstore bundle fallback used on a VPS.
+        # The workflow token is deliberately not exposed to this subprocess.
+        env:
+          GH_CONFIG_DIR: ${{ runner.temp }}/isolated-anonymous-gh
+        run: |
+          unset GH_TOKEN GITHUB_TOKEN
+          python3 - <<'PY'
+          import os,tempfile
+          from pathlib import Path
+          import release_verify
+          with tempfile.TemporaryDirectory() as temp:
+              files=release_verify.stage_revision(os.environ['GITHUB_SHA'],Path(temp))
+              assert set(files)==set(release_verify.FILES)
+              print('Clean VPS verified all four public release files with no Github login')
+          PY
