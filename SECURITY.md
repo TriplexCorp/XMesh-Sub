@@ -11,3 +11,29 @@
 - Backups are created under `/opt/xmesh-sub/backups` (root-only) before managed updates. Failure triggers a best-effort rollback of the previous configuration and Caddy service; verify gateway health after a failure. Remote updates cannot guarantee rollback of package-manager or system-wide changes.
 - The agent still needs host root privileges to operate Docker and update the installer. systemd restrictions reduce its ambient exposure but are **not** a privilege boundary against full root compromise.
 - Review upstream DNS, host firewall, CDN logs, and supply-chain changes independently. Validate a canary feed before migrating customer subscriptions.
+
+## Real-IP limiter and agent proof — rollout boundary
+
+The proposed gateway adds a private Caddy `forward_auth` connection over a
+Unix socket (not publicly bound TCP) and an independent, resource-bounded
+Python policy sidecar. Its only peer identity is the actual Caddy TCP peer,
+not a client-controlled `X-Forwarded-For` or `X-Real-IP`. A fronting CDN
+would be that peer and must not be silently treated as the visitor.
+IPv6 privacy addresses are grouped to /64. Shared IPv4 NAT users share a
+budget; monitor 429s in canary. Limiter absence or malformed config fails
+closed rather than bypassing subscriber flood protection.
+
+The paired manager keeps `agent-proof.pem` root-only (0600) and signs
+management requests with Ed25519, while its public key is bound in Nexus
+at one-time enrollment. A copied bearer token alone cannot poll or report.
+Full root compromise of the Sub host still permits signing from the live
+manager; hardware-backed keys and independent authorization would be an
+additional protection, not a claim of total compromise resistance.
+
+This release intentionally does **not** weaken the trusted update manifest.
+After source changes, an owner must offline sign new `release.json` and
+`release.json.sig` with the **same existing trusted key**. CI rejecting
+the old digest is expected; never change `release.pub`, skip signature
+verification or download an unsigned installer to silence that failure.
+New encrypted or authenticated client subscription URLs are not introduced;
+those URLs remain sensitive bearer secrets and need rotation if stolen.
