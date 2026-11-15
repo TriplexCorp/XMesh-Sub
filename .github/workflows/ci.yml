@@ -31,5 +31,5 @@ jobs:
           python3 tests/test-release-verify.py
           grep -Fq 'gh attestation verify' install.sh
           grep -Fq 'stage_revision' manager.py
-          test "$(cat VERSION)" = "0.4.1"
+          test "$(cat VERSION)" = "0.4.2"
           ! grep -Fq 'release.json.sig' install.sh

@@ -159,7 +159,15 @@ def service_request(config: dict, route: str, body: dict) -> dict:
         raise ValueError("Unsupported agent endpoint")
     url = config["panel"] + "/api/v1/sub-server/agent/" + route
     payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
+    # Validate the configured identity before touching the private key.
+    public_key = config.get("publicKey", "")
+    if public_key and (not isinstance(public_key, str) or
+                       not re.fullmatch(r"[0-9a-f]{64}", public_key)):
+        raise ValueError("Invalid pinned gateway public key")
     headers = signed_agent_headers(route, payload)
+    # Public (non-secret) selector, authenticated by the existing signature.
+    if public_key:
+        headers["X-XMesh-Sub-Public-Key"] = public_key
     headers.update({"Content-Type": "application/json", "Accept": "application/json"})
     request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     with verified_open(request, timeout=20) as response:

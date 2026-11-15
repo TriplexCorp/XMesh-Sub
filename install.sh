@@ -553,7 +553,7 @@ with opener.open(request, timeout=20) as response:
 if len(body) > 4096 or json.loads(body) != {"ok": True}:
     raise SystemExit("Nexus rejected Ed25519 enrollment")
 with open(path, "w", encoding="utf-8") as out:
-    json.dump({"panel": panel, "domain": domain, "path": sub_path}, out)
+    json.dump({"panel": panel, "domain": domain, "path": sub_path, "publicKey": public_key}, out)
 os.chmod(path, 0o600)
 PY
   chmod 600 "$temp/manager.json"
