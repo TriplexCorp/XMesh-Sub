@@ -215,23 +215,43 @@ cd "$ROOT"
 docker compose pull
 docker compose up -d --remove-orphans
 if [[ -n "$ENROLL_TOKEN" ]]; then
-  # The one-time credential is exchanged for a long-lived service token over
-  # verified TLS. Neither credential is printed in output. Only root may read it.
-  XMESH_ENROLL_TOKEN="$ENROLL_TOKEN" python3 - "$PANEL" "$DOMAIN" "$SUB_PATH" "$temp/manager.json" <<'PY'
-import json, os, re, ssl, sys, urllib.request
-panel, domain, sub_path, path = sys.argv[1:]
-request = urllib.request.Request(
-  panel + "/api/v1/sub-server/claim",
-  data=json.dumps({"enrollmentToken": os.environ["XMESH_ENROLL_TOKEN"], "domain": domain}).encode(),
-  headers={"Content-Type": "application/json"}, method="POST"
+  # Fresh Ed25519 identity is generated on the Sub VPS. Only the public
+  # key is sent to Nexus; there is no reusable bearer credential to steal.
+  openssl genpkey -algorithm Ed25519 -out "$temp/agent-key.pem" >/dev/null ||
+    die "Could not generate Sub agent identity"
+  chmod 600 "$temp/agent-key.pem"
+  XMESH_ENROLL_TOKEN="$ENROLL_TOKEN" python3 - "$PANEL" "$DOMAIN" "$SUB_PATH" \
+    "$temp/manager.json" "$temp/agent-key.pem" <<'PY'
+import json, os, pathlib, ssl, subprocess, sys, urllib.request
+panel, domain, sub_path, path, private_key = sys.argv[1:]
+der = subprocess.run(
+    ["openssl", "pkey", "-in", private_key, "-pubout", "-outform", "DER"],
+    check=True, capture_output=True, timeout=10
+).stdout
+prefix = bytes.fromhex("302a300506032b6570032100")
+if not der.startswith(prefix) or len(der) != len(prefix) + 32:
+    raise SystemExit("Invalid generated Ed25519 identity")
+public_key = der[len(prefix):].hex()
+class RejectRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+opener = urllib.request.build_opener(
+    urllib.request.HTTPSHandler(context=ssl.create_default_context()), RejectRedirect()
 )
-with urllib.request.urlopen(request, timeout=20, context=ssl.create_default_context()) as response:
-  body = response.read(4096)
-token = json.loads(body)["agentToken"]
-if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64}", token):
-  raise SystemExit("Nexus returned an invalid manager credential")
+request = urllib.request.Request(
+    panel + "/api/v1/sub-server/claim",
+    data=json.dumps({
+        "enrollmentToken": os.environ["XMESH_ENROLL_TOKEN"],
+        "domain": domain, "publicKey": public_key
+    }, separators=(",", ":")).encode("utf-8"),
+    headers={"Content-Type": "application/json"}, method="POST"
+)
+with opener.open(request, timeout=20) as response:
+    body = response.read(4097)
+if len(body) > 4096 or json.loads(body) != {"ok": True}:
+    raise SystemExit("Nexus rejected Ed25519 enrollment")
 with open(path, "w", encoding="utf-8") as out:
-  json.dump({"panel": panel, "domain": domain, "path": sub_path, "agentToken": token}, out)
+    json.dump({"panel": panel, "domain": domain, "path": sub_path}, out)
 os.chmod(path, 0o600)
 PY
   chmod 600 "$temp/manager.json"
@@ -241,10 +261,11 @@ if [[ -s "$temp/manager.py" ]]; then
   install -m 600 "$temp/release.pub" "$ROOT/release.pub"
   install -m 600 "$temp/release.json" "$ROOT/release.json"
   if [[ -s "$temp/manager.json" ]]; then
+    install -m 600 "$temp/agent-key.pem" "$ROOT/agent-key.pem"
     install -m 600 "$temp/manager.json" "$ROOT/manager.json"
   fi
-  # Fixed systemd service, no inbound ports, credentials live only in a
-  # root-owned JSON file; no Docker socket exposed to public containers.
+  # Fixed systemd service, no inbound ports. Ed25519 identity stays in a
+  # root-only PEM; the JSON file contains only non-secret connection settings.
   cat >"$temp/xmesh-sub-manager.service" <<'UNIT'
 [Unit]
 Description=XMesh Sub Outbound Management Agent
