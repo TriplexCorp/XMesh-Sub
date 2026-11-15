@@ -90,6 +90,19 @@ class ManagerTest(unittest.TestCase):
         self.assertIsNone(manager.RejectRedirect().redirect_request(
             request, None, 302, "Moved", {}, "https://evil.example.org"))
 
+    def test_mirror_header_pins_public_ed25519_key(self):
+        key = "a" * 64
+        config = {**self.config, "publicKey": key}
+        with patch.object(manager, "signed_agent_headers", return_value={}) as signing, \
+             patch.object(manager, "verified_open") as opening:
+            opening.return_value.__enter__.return_value.read.return_value = b'{"command":"none","flood":{"enabled":true,"mode":"protect","ipPerMinute":120}}'
+            manager.service_request(config, "poll", {"version":"0.4.2"})
+            request = opening.call_args.args[0]
+            self.assertEqual(request.get_header("X-xmesh-sub-public-key"), key)
+            signing.assert_called_once()
+        with self.assertRaises(ValueError):
+            manager.service_request({**self.config, "publicKey": "../evil"}, "poll", {"version":"0.4.2"})
+
     def test_agent_signatures_bind_route_time_nonce_and_body(self):
         import hashlib
         with tempfile.TemporaryDirectory() as tmp:
