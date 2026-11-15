@@ -37,6 +37,30 @@ class LimiterTest(unittest.TestCase):
         with self.assertRaises(OverflowError):
             limit.allow("192.0.2.3",2,now=130)
 
+    def test_worker_exhaustion_closes_connection_instead_of_spawning_threads(self):
+        import socketserver
+        with tempfile.TemporaryDirectory() as directory:
+            server = edge.UnixHTTPServer(str(Path(directory) / "bounded.sock"), edge.PolicyHandler)
+            try:
+                self.assertLessEqual(server.MAX_ACTIVE_WORKERS, 64)
+                # Simulate a fully occupied worker pool.
+                slots = [server._slots.acquire(blocking=False) for _ in range(server.MAX_ACTIVE_WORKERS)]
+                self.assertTrue(all(slots))
+                a, b = socket.socketpair()
+                try:
+                    with patch.object(socketserver.ThreadingMixIn, "process_request") as spawn:
+                        server.process_request(a, None)
+                        spawn.assert_not_called()
+                    b.settimeout(1)
+                    self.assertEqual(b.recv(1), b"")
+                finally:
+                    a.close()
+                    b.close()
+                    for _ in slots:
+                        server._slots.release()
+            finally:
+                server.server_close()
+
     def test_invalid_policy_fails_closed(self):
         with tempfile.TemporaryDirectory() as temp:
             policy=Path(temp)/"policy.json"
