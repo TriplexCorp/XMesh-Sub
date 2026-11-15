@@ -268,7 +268,7 @@ def cycle(config: dict) -> bool:
     reply = service_request(config, "poll", {"version": current_version()})
     # The signed Nexus policy must be present and valid on every poll.
     # Never silently disable the local edge limit on missing/malformed data.
-    accept_edge_policy(config, reply["flood"])
+    accept_edge_policy(config, reply["flood"], path=EDGE_POLICY_FILE)
     if reply.get("command") != "update":
         return False
     job = reply.get("jobId")
