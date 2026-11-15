@@ -96,6 +96,10 @@ The management agent makes outbound-only HTTPS requests to Nexus. It accepts
 only the fixed `update` action, not arbitrary shell commands or URLs.
 The server owner generates a one-time enrollment code in Subscription Studio
 and copies a single command for installation and pairing.
+Enrollment creates a local Ed25519 private key and registers only its public key
+with Nexus. Every subsequent poll/report is signed with a timestamp, random nonce,
+route and exact body hash; old Bearer manager credentials are rejected.
+Clean re-enrollment is required for the strict final protocol.
 
 Every management update downloads the **offline-signed** `release.json`
 manifest and verifies its Ed25519 signature against a public trust anchor
@@ -123,3 +127,9 @@ To inspect the agent:
     sudo journalctl -u xmesh-sub-manager -n 50 --no-pager
 
 Only one managed Sub server is supported per Nexus installation.
+
+## Peer-IP flood defense — staged v0.4.0
+
+The staged installer embeds an audited Python limiter into the **offline-signed installer** (never downloaded as an unsigned executable). A separate unprivileged container listens only on a private Unix-domain socket. Caddy overwrites the limiter request's peer-IP header with its own connection peer (`{remote_host}`) and strips all original request headers, URI and cookies from the authorization request. No subscriber bearer token enters the limiter. The limiter normalizes IPv4-mapped IPv6 and groups native IPv6 by /64, maintains bounded HMAC-keyed token buckets and bounds active worker threads. Protected mode returns 429 with `Retry-After` for over-budget requests; missing/invalid policy or limiter outages fail closed.
+
+**Release blocker:** These source files are not deployable until the offline Ed25519 signing owner reviews the changes, generates the matching v0.4.0 `release.json` and `release.json.sig` using the existing trust anchor and CI verifies exact digests. Do not disable signature checks. Also prevent bypass of the Sub gateway by fetching a subscription directly from the Nexus panel origin, and verify kernel-level peer identity in the chosen Docker/CDN topology before production rollout.

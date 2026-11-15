@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import shutil
 import ssl
 import subprocess
@@ -29,6 +30,8 @@ SCRIPT_URL = "https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/insta
 RELEASE_MANIFEST_URL = "https://raw.githubusercontent.com/TriplexCorp/XMesh-Sub/main/release.json"
 RELEASE_SIGNATURE_URL = RELEASE_MANIFEST_URL + ".sig"
 PUBLIC_KEY_FILE = ROOT / "release.pub"
+PRIVATE_KEY_FILE = ROOT / "agent-key.pem"
+EDGE_POLICY_FILE = ROOT / "edge-policy" / "config.json"
 BACKUPS = ROOT / "backups"
 POLL_INTERVAL_SECONDS = 20
 MAX_INSTALLER_BYTES = 128 * 1024
@@ -38,19 +41,19 @@ JOB_RE = re.compile(r"^[0-9a-f]{32}$")
 def read_config(path: Path = CONFIG_FILE) -> dict:
     config = json.loads(path.read_text(encoding="utf-8"))
     panel = config.get("panel")
-    token = config.get("agentToken")
     domain = config.get("domain")
     sub_path = config.get("path")
     if (not isinstance(panel, str) or not re.fullmatch(r"https://[A-Za-z0-9.-]+", panel)
-            or not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64}", token)
             or not isinstance(domain, str) or not re.fullmatch(r"[A-Za-z0-9.-]+", domain)
             or not isinstance(sub_path, str) or not re.fullmatch(r"/[A-Za-z0-9_/-]+", sub_path)):
         raise ValueError("Invalid manager configuration")
+    if set(config) != {"panel", "domain", "path"}:
+        raise ValueError("Unexpected manager configuration fields")
     return config
 
 
 class RejectRedirect(urllib.request.HTTPRedirectHandler):
-    # Never replay long-lived bearer credentials across redirects.
+    # Never replay signed machine requests across HTTP redirects.
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
@@ -116,7 +119,7 @@ def backup_installation(root: Path = ROOT) -> Path:
     destination.mkdir(mode=0o700, exist_ok=True)
     backup = Path(tempfile.mkdtemp(prefix="pre-update-", dir=str(destination)))
     backup.chmod(0o700)
-    files = ("Caddyfile", "compose.yaml", "manager.py", "manager.json",
+    files = ("Caddyfile", "compose.yaml", "manager.py", "manager.json", "agent-key.pem", "limiter.py",
              "release.pub", "release.json", "VERSION")
     for name in files:
         old = root / name
@@ -128,7 +131,7 @@ def backup_installation(root: Path = ROOT) -> Path:
 
 
 def restore_installation(backup: Path, root: Path = ROOT) -> None:
-    for name in ("Caddyfile", "compose.yaml", "manager.py", "manager.json",
+    for name in ("Caddyfile", "compose.yaml", "manager.py", "manager.json", "agent-key.pem", "limiter.py",
                  "release.pub", "release.json", "VERSION"):
         saved = backup / name
         target = root / name
@@ -140,22 +143,73 @@ def restore_installation(backup: Path, root: Path = ROOT) -> None:
                     "up", "-d", "--remove-orphans"], cwd=root, check=True, timeout=180)
 
 
+def signed_agent_headers(route: str, payload: bytes, key: Path = PRIVATE_KEY_FILE) -> dict:
+    """Proof of possession for each exact request. No reusable bearer credential."""
+    if route not in {"poll", "report"} or len(payload) > 4096:
+        raise ValueError("Unsupported signed agent request")
+    # Root-owned private key, not a symlink/hardlink. Fail closed if permissions drift.
+    metadata = key.lstat()
+    if (not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_uid != os.geteuid() or metadata.st_nlink != 1):
+        raise PermissionError("Agent private key permissions invalid")
+    timestamp = str(int(time.time()))
+    nonce = os.urandom(16).hex()
+    digest = hashlib.sha256(payload).hexdigest()
+    canonical = (f"XMESH-SUB1\nPOST\n/api/v1/sub-server/agent/{route}\n"
+                 f"{timestamp}\n{nonce}\n{digest}\n").encode("ascii")
+    # OpenSSL Ed25519 requires a regular input file for one-shot signing.
+    with tempfile.TemporaryDirectory(prefix="xmesh-sub-sign-") as location:
+        message = Path(location) / "message"
+        message.write_bytes(canonical)
+        signature = subprocess.run([
+            "openssl", "pkeyutl", "-sign", "-inkey", str(key),
+            "-rawin", "-in", str(message),
+        ], check=True, timeout=10, capture_output=True).stdout
+    if len(signature) != 64:
+        raise ValueError("Invalid agent signature length")
+    return {
+        "X-XMesh-Sub-Timestamp": timestamp,
+        "X-XMesh-Sub-Nonce": nonce,
+        "X-XMesh-Sub-Signature": signature.hex(),
+    }
+
+
+def accept_edge_policy(config: dict, policy: object, path: Path = EDGE_POLICY_FILE) -> None:
+    """Commit only a bounded, authenticated policy from the Nexus poll reply."""
+    if not isinstance(policy, dict) or set(policy) != {"enabled", "mode", "ipPerMinute"}:
+        raise ValueError("Invalid Nexus edge policy")
+    enabled, mode, limit = policy["enabled"], policy["mode"], policy["ipPerMinute"]
+    if type(enabled) is not bool or mode not in ("monitor", "protect") or type(limit) is not int or not 1 <= limit <= 100_000:
+        raise ValueError("Invalid edge flood limit")
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, mode="w", encoding="utf-8", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+        try:
+            json.dump({"enabled": enabled, "mode": mode, "ipPerMinute": limit}, tmp)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            os.chmod(tmp_path, 0o644)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+    os.replace(tmp_path, path)
+
+
 def service_request(config: dict, route: str, body: dict) -> dict:
-    # route is fixed in source code, never server-controlled.
+    # Route set is local and fixed, never server-controlled.
+    if route not in {"poll", "report"}:
+        raise ValueError("Unsupported agent endpoint")
     url = config["panel"] + "/api/v1/sub-server/agent/" + route
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(body, separators=(",", ":")).encode("utf-8"),
-        headers={"Authorization": "Bearer " + config["agentToken"],
-                 "Content-Type": "application/json",
-                 "Accept": "application/json"},
-        method="POST",
-    )
+    payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
+    headers = signed_agent_headers(route, payload)
+    headers.update({"Content-Type": "application/json", "Accept": "application/json"})
+    request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     with verified_open(request, timeout=20) as response:
-        payload = response.read(16384 + 1)
-        if len(payload) > 16384:
+        raw = response.read(16384 + 1)
+        if len(raw) > 16384:
             raise ValueError("Oversized response")
-    value = json.loads(payload)
+    value = json.loads(raw)
     if not isinstance(value, dict):
         raise ValueError("Unexpected API reply")
     return value
@@ -212,6 +266,9 @@ def current_version(path: Path = VERSION_FILE) -> str:
 def cycle(config: dict) -> bool:
     """Return True if updated, so systemd restarts the agent from newest file."""
     reply = service_request(config, "poll", {"version": current_version()})
+    # The signed Nexus policy must be present and valid on every poll.
+    # Never silently disable the local edge limit on missing/malformed data.
+    accept_edge_policy(config, reply["flood"], path=EDGE_POLICY_FILE)
     if reply.get("command") != "update":
         return False
     job = reply.get("jobId")
@@ -221,7 +278,7 @@ def cycle(config: dict) -> bool:
     try:
         perform_update(config)
     except Exception as error:
-        # Fixed message; never leak paths, headers, bearer tokens or subprocess args.
+        # Fixed message; never leak paths, signed request data or subprocess args.
         try:
             report(config, job, "failed", type(error).__name__[:50])
         except Exception:
