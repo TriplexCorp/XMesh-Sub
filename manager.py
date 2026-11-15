@@ -157,7 +157,7 @@ def proof_headers(config: dict, route: str, wire: bytes, key_file: Path = AGENT_
     path = "/api/v1/sub-server/agent/" + route
     token_hash = hashlib.sha256(config["agentToken"].encode("ascii")).hexdigest()
     body_hash = hashlib.sha256(wire).hexdigest()
-    message = "\\n".join((
+    message = "\n".join((
         "xmesh-sub-proof-v1", token_hash, "POST", path, ts, nonce, body_hash,
     )).encode("ascii")
     # OpenSSL Ed25519 pkeyutl requires seekable input (-rawin).
