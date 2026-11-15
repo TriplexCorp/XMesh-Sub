@@ -71,5 +71,10 @@ grep -Fq 'ProtectKernelModules=true' install.sh
 grep -Fq 'NoNewPrivileges=true' install.sh
 grep -Fq 'xmesh-sub-manager.service' install.sh
 grep -Fq '/api/v1/sub-server/claim' install.sh
+grep -Fq '"publicKey": public_key' install.sh
+grep -Fq 'agent-key.pem' install.sh
+if grep -Fq 'agentToken' install.sh || grep -Fq 'agentToken' manager.py; then
+  echo 'ERROR: legacy bearer authentication must be removed' >&2; exit 1
+fi
 grep -Fq 'SKIP_MANAGER_RESTART' install.sh
 echo 'Installer validation tests passed'
