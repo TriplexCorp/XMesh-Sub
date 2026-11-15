@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """No network or root required; agent must never execute arbitrary panel commands."""
 import base64
+import hashlib
 import importlib.util
+import os
+import io
+import time
+import urllib.request
 import json
 from pathlib import Path
 import subprocess
@@ -41,6 +46,69 @@ class ManagerTest(unittest.TestCase):
                 file.write_text(json.dumps(config))
                 with self.assertRaises(ValueError):
                     manager.read_config(file)
+
+    def test_sender_key_is_private_and_bound_to_manager(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            key = Path(tmp)/"proof.pem"
+            config_file = Path(tmp)/"manager.json"
+            subprocess.run(["openssl","genpkey","-algorithm","Ed25519","-out",str(key)],
+                           check=True,capture_output=True)
+            key.chmod(0o600)
+            config={**self.config,"proofKey":str(key)}
+            config_file.write_text(json.dumps(config))
+            with patch.object(manager,"AGENT_PROOF_KEY",key):
+                self.assertEqual(manager.read_config(config_file),config)
+                key.chmod(0o644)
+                with self.assertRaises(ValueError):
+                    manager.read_config(config_file)
+                key.chmod(0o600)
+
+    def test_signed_agent_request_binds_exact_wire_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            key=Path(tmp)/"proof.pem"
+            pub=Path(tmp)/"pub.pem"
+            subprocess.run(["openssl","genpkey","-algorithm","Ed25519","-out",str(key)],
+                           check=True,capture_output=True)
+            subprocess.run(["openssl","pkey","-in",str(key),"-pubout","-out",str(pub)],
+                           check=True,capture_output=True)
+            raw=b'{"version":"0.4.0"}'
+            proof=manager.proof_headers(self.config,"poll",raw,key_file=key)
+            message=(
+                "xmesh-sub-proof-v1\n" +
+                hashlib.sha256(self.config["agentToken"].encode()).hexdigest() +
+                "\nPOST\n/api/v1/sub-server/agent/poll\n" +
+                proof["X-XMesh-Proof-Ts"] + "\n" +
+                proof["X-XMesh-Proof-Nonce"] + "\n" +
+                hashlib.sha256(raw).hexdigest()
+            ).encode()
+            plain=Path(tmp)/"raw"
+            plain.write_bytes(message)
+            sig=Path(tmp)/"sig"
+            sig.write_bytes(bytes.fromhex(proof["X-XMesh-Proof-Sig"]))
+            subprocess.run(["openssl","pkeyutl","-verify","-pubin","-inkey",str(pub),
+                            "-rawin","-in",str(plain),"-sigfile",str(sig)],
+                           check=True,capture_output=True)
+            plain.write_bytes(message.replace(b"0.4.0",b"0.5.0"))
+            # Proofs are also tied to the canonical body hash, so signatures
+            # cannot be replayed over altered wire bytes.
+            plain.write_bytes(message.replace(
+                hashlib.sha256(raw).hexdigest().encode(),
+                hashlib.sha256(b'{"version":"0.5.0"}').hexdigest().encode()))
+            bad=subprocess.run(["openssl","pkeyutl","-verify","-pubin","-inkey",str(pub),
+                                "-rawin","-in",str(plain),"-sigfile",str(sig)],
+                               capture_output=True)
+            self.assertNotEqual(bad.returncode,0)
+
+    def test_poll_persists_valid_bounded_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            file=Path(tmp)/"policy.json"
+            valid={"enabled":True,"mode":"protect","ipPerMinute":120}
+            manager.accept_edge_policy(self.config,valid,path=file)
+            self.assertEqual(json.loads(file.read_text()),valid)
+            self.assertEqual(file.stat().st_mode&0o777,0o644)
+            with self.assertRaises(ValueError):
+                manager.accept_edge_policy(self.config,{"enabled":True,"mode":"off","ipPerMinute":0},path=file)
+            self.assertEqual(json.loads(file.read_text()),valid)
 
     def test_unknown_command_is_ignored(self):
         with patch.object(manager, "service_request", return_value={
