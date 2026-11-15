@@ -10,6 +10,17 @@ fail_expected() {
 out=$(bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --dry-run)
 grep -Fq 'path_regexp ^(/s|/sub|/portal)/[0-9a-f]{64}$' <<< "$out"
 grep -Fq 'reverse_proxy https://panel.example.org' <<< "$out"
+grep -Fq 'forward_auth unix//run/xmesh-sub/rate.sock' <<< "$out"
+grep -Fq 'header_up X-XMesh-Peer-IP {remote_host}' <<< "$out"
+grep -Fq 'header_up -*' <<< "$out"
+grep -Fq 'xmesh-sub-limiter:' <<< "$out"
+grep -Fq './run:/run/xmesh-sub:ro' <<< "$out"
+# The signed installer embeds the exact, audited limiter source, no unsigned
+# source fetch or module download is permitted on the Sub VPS.
+tmp_limiter=$(mktemp)
+trap 'rm -f "$tmp_limiter"' EXIT
+sed -n '/^# limiter.py$/,$p' <<< "$out" | sed '1d' >"$tmp_limiter"
+cmp -s limiter.py "$tmp_limiter" || { echo 'ERROR: signed installer limiter differs from source' >&2; exit 1; }
 # The standard proxy must retain origin subscription metadata, including
 # profile-web-page-url and support-url. The personal webpage points to the
 # same allowlisted /s/{token} route with ?view=portal.
@@ -71,5 +82,8 @@ grep -Fq 'ProtectKernelModules=true' install.sh
 grep -Fq 'NoNewPrivileges=true' install.sh
 grep -Fq 'xmesh-sub-manager.service' install.sh
 grep -Fq '/api/v1/sub-server/claim' install.sh
+grep -Fq '"proofPublicKey":pub' install.sh
+grep -Fq 'agent-proof.pem' install.sh
+grep -Fq '"proofKey":"/opt/xmesh-sub/agent-proof.pem"' install.sh
 grep -Fq 'SKIP_MANAGER_RESTART' install.sh
 echo 'Installer validation tests passed'
