@@ -12,10 +12,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Syntax and ShellCheck
         run: |
-          bash -n install.sh tests/test-install.sh
-          shellcheck -s bash install.sh tests/test-install.sh
+          bash -n install.sh bootstrap.sh tests/test-install.sh tests/test-bootstrap.sh
+          shellcheck -s bash install.sh bootstrap.sh tests/test-install.sh tests/test-bootstrap.sh
       - name: Installer argument tests
-        run: bash tests/test-install.sh
+        run: |
+          bash tests/test-install.sh
+          bash tests/test-bootstrap.sh
       - name: Outbound signed agent and edge IP limiter tests
         run: |
           python3 -m py_compile manager.py limiter.py
