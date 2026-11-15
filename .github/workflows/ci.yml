@@ -14,6 +14,13 @@ jobs:
         run: |
           bash -n install.sh tests/test-install.sh
           shellcheck -s bash install.sh tests/test-install.sh
+      - name: Installer argument tests
+        run: bash tests/test-install.sh
+      - name: Outbound management agent and private edge limiter tests
+        run: |
+          python3 -m py_compile manager.py limiter.py tests/test-limiter.py
+          python3 tests/test-manager.py
+          python3 tests/test-limiter.py
       - name: Verify offline-signed release and exact build digests
         run: |
           base64 -d release.json.sig > release.sig.bin
@@ -26,13 +33,6 @@ jobs:
           for name,key in [('install.sh','installSha256'),('manager.py','managerSha256')]:
               assert hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()==manifest[key], name
           PY
-      - name: Installer argument tests
-        run: bash tests/test-install.sh
-      - name: Outbound management agent and private edge limiter tests
-        run: |
-          python3 -m py_compile manager.py limiter.py tests/test-limiter.py
-          python3 tests/test-manager.py
-          python3 tests/test-limiter.py
       - name: Validate rendered Caddy configuration
         run: |
           bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --dry-run | sed -n '/^# Caddyfile$/,/^# compose.yaml$/p' | sed '1d;$d' > Caddyfile
