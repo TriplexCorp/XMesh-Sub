@@ -123,3 +123,45 @@ To inspect the agent:
     sudo journalctl -u xmesh-sub-manager -n 50 --no-pager
 
 Only one managed Sub server is supported per Nexus installation.
+
+## Edge flood protection and signed manager identity (proposed v0.4)
+
+The public subscription routes remain GET/HEAD `/<path>/<64-hex-token>`
+and their metadata stays untouched. An internal Caddy `forward_auth` check
+connects over a **Unix socket** to a no-TCP-listener Python sidecar. Caddy
+supplies only the direct TCP peer from `{remote_host}` and strips incoming
+headers, so client-supplied `X-Forwarded-For` **cannot** select another IP.
+A CDN/reverse proxy in front of this VPS would become the direct peer; do
+not assume the original visitor IP is available without a separately audited
+trusted-edge configuration.
+
+The limiter uses a memory-bounded per-peer token bucket, exact IPv4 addresses
+and native IPv6 /64 prefixes (IPv4-mapped IPv6 is normalized to IPv4).
+It never logs full URLs, subscriber tokens or IPs. The limit and monitor/
+protect settings are synced from Nexus on authenticated agent polls to
+`/opt/xmesh-sub/edge-policy/config.json`. Policy parsing failure or the
+sidecar becoming unavailable fails closed (HTTP 503/502). A rate excess
+returns HTTP 429 and `Retry-After`. Shared NAT users can reach one IP
+budget; set an appropriate limit and check client retries during canary.
+
+A fresh enrolled manager generates `/opt/xmesh-sub/agent-proof.pem` (root
+only, mode 0600) locally and uploads just its Ed25519 public key with the
+one-time claim. It signs the token digest, POST path, timestamp, unique
+nonce and exact request body for each poll/report. Nexus rejects a stolen
+bearer without the private signing key and rejects replay via Redis.
+**Existing managers remain legacy until re-enrolled.** Do not enable
+`XMESH_SUB_REQUIRE_PROOF=true` in Nexus until pairing is complete.
+
+**Release signing is required before deployment.** The installer embeds
+`limiter.py` so the existing schema-1 signed manifest remains compatible
+with the original update agent. It is not enough to merge the source into
+main: new install/manager SHA-256 values must be offline signed by the
+existing trusted signing identity, using `tools/sign-release.sh`.
+CI intentionally refuses an unsigned/modified release. No private release
+signing key belongs on a VPS, inside GitHub, or in ChatGPT.
+
+Suggested order: merge Nexus proof verification with backward compatibility,
+sign and publish Sub release, canary test installed clients, re-enroll Sub
+through Subscription Studio (to rotate its bearer and register the new
+public key), then enable strict mode on Nexus. Verify update rollback and
+old subscription URLs before switching production traffic.
