@@ -34,6 +34,19 @@ class ManagerTest(unittest.TestCase):
             file = Path(tmp) / "config.json"
             file.write_text(json.dumps(self.config))
             self.assertEqual(manager.read_config(file), self.config)
+            # The real installer ALWAYS writes publicKey after successful
+            # enrollment; accepting only the three legacy fields made the
+            # running agent reject its own configuration on every poll.
+            enrolled = {**self.config, "publicKey": "a" * 64}
+            file.write_text(json.dumps(enrolled))
+            self.assertEqual(manager.read_config(file), enrolled)
+            for invalid_key in ("", "a" * 63, "A" * 64, "../evil", None, 1):
+                file.write_text(json.dumps({**self.config, "publicKey": invalid_key}))
+                with self.subTest(publicKey=invalid_key), self.assertRaises(ValueError):
+                    manager.read_config(file)
+            file.write_text(json.dumps({**enrolled, "unexpected": "value"}))
+            with self.assertRaises(ValueError):
+                manager.read_config(file)
             file.write_text(json.dumps({**self.config, "agentToken": "a" * 64}))
             with self.assertRaises(ValueError):
                 manager.read_config(file)
@@ -49,6 +62,19 @@ class ManagerTest(unittest.TestCase):
                 file.write_text(json.dumps(config))
                 with self.assertRaises(ValueError):
                     manager.read_config(file)
+
+    def test_installer_enrollment_file_can_poll(self):
+        # The installer writes a publicKey selector. Prove it survives config
+        # validation and reaches the authenticated poll rather than looping.
+        with tempfile.TemporaryDirectory() as tmp:
+            config_file = Path(tmp) / "manager.json"
+            installed = {**self.config, "publicKey": "e" * 64}
+            config_file.write_text(json.dumps(installed), encoding="utf-8")
+            with patch.object(manager, "service_request", return_value={
+                "command": "none", "flood": self.flood
+            }) as poll:
+                self.assertFalse(manager.cycle(manager.read_config(config_file)))
+                poll.assert_called_once_with(installed, "poll", {"version": manager.current_version()})
 
     def test_unknown_command_is_ignored(self):
         with patch.object(manager, "service_request", return_value={

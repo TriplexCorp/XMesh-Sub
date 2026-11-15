@@ -94,6 +94,7 @@ grep -Fq 'Use the automatically attested installer command from Nexus' install.s
 grep -Fq 'ProtectKernelModules=true' install.sh
 grep -Fq 'NoNewPrivileges=true' install.sh
 grep -Fq 'xmesh-sub-manager.service' install.sh
+grep -Fq 'manager.read_config(root / "manager.json")' install.sh
 grep -Fq '/api/v1/sub-server/claim' install.sh
 grep -Fq '"publicKey": public_key' install.sh
 grep -Fq 'agent-key.pem' install.sh

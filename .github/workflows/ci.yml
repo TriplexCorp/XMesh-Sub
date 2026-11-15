@@ -31,5 +31,11 @@ jobs:
           python3 tests/test-release-verify.py
           grep -Fq 'gh attestation verify' install.sh
           grep -Fq 'stage_revision' manager.py
-          test "$(cat VERSION)" = "0.4.2"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          version = Path("VERSION").read_text().strip()
+          assert re.fullmatch(r"\d+\.\d+\.\d+", version)
+          assert tuple(map(int, version.split("."))) >= (0, 4, 3)
+          PY
           ! grep -Fq 'release.json.sig' install.sh

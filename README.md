@@ -132,7 +132,17 @@ To inspect the agent:
     sudo systemctl status xmesh-sub-manager
     sudo journalctl -u xmesh-sub-manager -n 50 --no-pager
 
-Only one managed Sub server per Nexus installation is supported.
+If Nexus shows **Enrolled / Offline** immediately after a managed install,
+the enrollment claim may have succeeded while the outbound manager has not
+yet completed a signed poll. Check the service logs. Release 0.4.3 fixes an
+installer/manager schema mismatch: the installer writes the gateway's
+`publicKey`, which the earlier manager erroneously rejected. For a VPS
+installed with that release, regenerate the **managed installation command**
+in Nexus after 0.4.3 has been attested and run it again on the existing VPS.
+A fresh OS installation is unnecessary. The new installation verifies the
+signed release and checks the manager configuration before reporting success.
+
+Primary and mirror Sub servers can be managed independently from Nexus.
 
 ## Peer-IP flood defense
 
