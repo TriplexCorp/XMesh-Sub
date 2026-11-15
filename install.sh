@@ -258,11 +258,39 @@ LIMITER = BucketLimiter()
 
 class UnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
-    request_queue_size = 256
+    request_queue_size = 128
     allow_reuse_address = True
+    MAX_ACTIVE_WORKERS = 64
+
+    def __init__(self, *args, **kwargs):
+        self._slots = threading.BoundedSemaphore(self.MAX_ACTIVE_WORKERS)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        # ThreadingMixIn alone creates unlimited threads under connection floods.
+        # Exhaustion denies the request (Caddy returns an upstream failure),
+        # never bypasses the authentication gate.
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
 
 class PolicyHandler(BaseHTTPRequestHandler):
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(5)
+
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format_string, *args):
