@@ -14,8 +14,17 @@ permissions:
   contents: read
 jobs:
   image-cve-gate:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    name: image-cve-gate (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     steps:
       - name: Fetch exact source without persistent credentials
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -49,13 +58,13 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          docker pull --platform linux/amd64 caddy:2.11.9-alpine
-          docker pull --platform linux/amd64 python:3.12.16-alpine3.24
+          docker pull --platform linux/${{ matrix.arch }} caddy:2.11.9-alpine
+          docker pull --platform linux/${{ matrix.arch }} python:3.12.16-alpine3.24
           mkdir -p "$RUNNER_TEMP/limiter-build" "$RUNNER_TEMP/caddy-build"
           cp "$RUNNER_TEMP/Dockerfile.limiter" "$RUNNER_TEMP/limiter-build/Dockerfile"
           cp "$RUNNER_TEMP/Dockerfile.caddy" "$RUNNER_TEMP/caddy-build/Dockerfile"
-          docker build --pull --platform linux/amd64 --tag xmesh-sub-limiter:3.12.16-krb5r1 "$RUNNER_TEMP/limiter-build"
-          docker build --pull --platform linux/amd64 --tag xmesh-sub-caddy:2.11.9-josev4r1 "$RUNNER_TEMP/caddy-build"
+          docker build --pull --platform linux/${{ matrix.arch }} --tag xmesh-sub-limiter:3.12.16-krb5r1 "$RUNNER_TEMP/limiter-build"
+          docker build --pull --platform linux/${{ matrix.arch }} --tag xmesh-sub-caddy:2.11.9-josev4r1 "$RUNNER_TEMP/caddy-build"
           {
             docker image inspect --format '{{index .RepoDigests 0}}' caddy:2.11.9-alpine
             docker image inspect --format '{{index .RepoDigests 0}}' python:3.12.16-alpine3.24
@@ -107,7 +116,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: sub-runtime-image-security
+          name: sub-runtime-image-security-${{ matrix.arch }}
           path: |
             ${{ runner.temp }}/caddy-vulnerabilities.json
             ${{ runner.temp }}/limiter-vulnerabilities.json
