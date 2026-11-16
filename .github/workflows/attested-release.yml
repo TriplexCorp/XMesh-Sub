@@ -14,7 +14,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  runtime-image-security:
+    # Reuse the exact two-architecture CVE gate on the trusted main revision.
+    # No signing or OIDC token is available to this job.
+    permissions:
+      contents: read
+    uses: ./.github/workflows/image-security.yml
+
   publish:
+    needs: runtime-image-security
     if: github.repository == 'TriplexCorp/XMesh-Sub' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
