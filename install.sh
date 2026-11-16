@@ -125,11 +125,14 @@ DOCKER
 }
 render_caddy_dockerfile() {
   # Caddy's official binary retains x/net 0.60.0 in this exact image.
-  # Rebuild with the patched HTML parser while retaining the stock modules,
-  # native Caddyfile syntax, ACME support and persistent /data volume.
+  # Rebuild Caddy using the upstream Smallstep JOSE-v4 migration and patched
+  # x/net; retain stock Caddy modules, native Caddyfile syntax and ACME.
   cat <<'DOCKER'
 FROM caddy:2.11.9-builder-alpine AS builder
-RUN xcaddy build v2.11.9 --replace golang.org/x/net=golang.org/x/net@v0.62.0
+RUN xcaddy build v2.11.9 \
+    --replace github.com/smallstep/certificates=github.com/smallstep/certificates@v0.30.3-0.20261105213751-6d5a251fbe01 \
+    --replace go.step.sm/crypto=go.step.sm/crypto@v0.92.0 \
+    --replace golang.org/x/net=golang.org/x/net@v0.62.0
 FROM caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 DOCKER
@@ -158,7 +161,7 @@ services:
       - /tmp
     # No published ports: Caddy is the only client, via a shared Unix socket.
   xmesh-sub:
-    image: xmesh-sub-caddy:2.11.9-xnet062r1
+    image: xmesh-sub-caddy:2.11.9-josev4r1
     build:
       context: .
       dockerfile: Dockerfile.caddy
@@ -547,9 +550,9 @@ docker build --pull -t xmesh-sub-limiter:3.12.16-krb5r1 "$temp/image-build" ||
   die "Could not build patched limiter image; existing deployment unchanged"
 mkdir -p "$temp/caddy-build"
 cp "$temp/Dockerfile.caddy" "$temp/caddy-build/Dockerfile"
-docker build --pull -t xmesh-sub-caddy:2.11.9-xnet062r1 "$temp/caddy-build" ||
+docker build --pull -t xmesh-sub-caddy:2.11.9-josev4r1 "$temp/caddy-build" ||
   die "Could not build patched Caddy binary; existing deployment unchanged"
-docker run --rm -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" xmesh-sub-caddy:2.11.9-xnet062r1 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ||
+docker run --rm -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" xmesh-sub-caddy:2.11.9-josev4r1 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ||
   die "Gateway configuration invalid, existing deployment unchanged"
 [[ ! -f "$ROOT/Caddyfile" ]] || cp -p "$ROOT/Caddyfile" "$ROOT/Caddyfile.previous"
 install -m 600 "$temp/Caddyfile" "$ROOT/Caddyfile"
