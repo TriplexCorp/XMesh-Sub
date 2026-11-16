@@ -72,6 +72,9 @@ jobs:
             docker image inspect --format '{{.Id}}' xmesh-sub-caddy:2.11.9-josev4r1
           } | tee "$RUNNER_TEMP/image-digests.txt"
           docker run --rm -v "$RUNNER_TEMP/sub-dry-run:/tmp/ignore:ro" xmesh-sub-caddy:2.11.9-josev4r1 caddy version
+          sed -n '/^# Caddyfile$/,/^# compose.yaml$/p' "$RUNNER_TEMP/sub-dry-run" | sed '1d;$d' > "$RUNNER_TEMP/Caddyfile"
+          test -s "$RUNNER_TEMP/Caddyfile"
+          docker run --rm -v "$RUNNER_TEMP/Caddyfile:/etc/caddy/Caddyfile:ro" xmesh-sub-caddy:2.11.9-josev4r1 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
           docker run --rm xmesh-sub-caddy:2.11.9-josev4r1 caddy build-info > "$RUNNER_TEMP/caddy-build-info.txt"
           if grep -Fq 'github.com/go-jose/go-jose/v3' "$RUNNER_TEMP/caddy-build-info.txt"; then
             echo 'Unexpected vulnerable JOSE-v3 dependency in final Caddy build' >&2
