@@ -49,7 +49,7 @@ docker run -d --name "$limiter_name" --network none \
   -v "$temp/policy:/etc/xmesh-sub/policy:ro" \
   -v "$PWD/limiter.py:/opt/limiter.py:ro" \
   xmesh-sub-limiter:3.12.16-krb5r1 python3 -I /opt/limiter.py >/dev/null
-for i in $(seq 1 60); do
+for ((attempt=0; attempt<60; attempt++)); do
   [[ -S "$temp/run/rate.sock" ]] && break
   sleep 0.2
 done
@@ -65,7 +65,7 @@ docker run -d --name "$caddy_name" --network bridge \
 address=$(docker port "$caddy_name" 8080/tcp | head -n 1)
 [[ "$address" =~ ^127[.]0[.]0[.]1:[0-9]+$ ]] || { echo 'Unexpected local-only Caddy binding' >&2; exit 1; }
 base="http://$address"
-for i in $(seq 1 60); do
+for ((attempt=0; attempt<60; attempt++)); do
   [[ $(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$base/healthz") == 200 ]] && break
   sleep 0.2
 done
