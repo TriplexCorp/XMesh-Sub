@@ -31,21 +31,30 @@ jobs:
           import os, pathlib, re
           compose=pathlib.Path(os.environ["RUNNER_TEMP"],"compose.yaml").read_text()
           refs=re.findall(r"^\s+image:\s+(\S+)\s*$",compose,re.M)
-          allowed=("python:3.12.16-alpine3.24","caddy:2.11.9-alpine")
+          allowed=("xmesh-sub-limiter:3.12.16-krb5r1","caddy:2.11.9-alpine")
           if len(refs)!=2 or set(refs)!=set(allowed):
               raise SystemExit(f"Unexpected installer runtime images: {refs}")
           pathlib.Path(os.environ["RUNNER_TEMP"],"image-refs.txt").write_text("\n".join(refs)+"\n")
+          dockerfile=pathlib.Path(os.environ["RUNNER_TEMP"],"sub-dry-run").read_text().split("# Dockerfile.limiter\n",1)[1].split("\n# Caddyfile\n",1)[0]
+          if "FROM python:3.12.16-alpine3.24@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89" not in dockerfile or "apk --no-cache upgrade krb5-libs" not in dockerfile:
+              raise SystemExit("Signed installer did not render the pinned patched limiter Dockerfile")
+          pathlib.Path(os.environ["RUNNER_TEMP"],"Dockerfile.limiter").write_text(dockerfile)
           print("Verified both signed-installer image references")
           PY
-      - name: Pull and record actual image content digests
+      - name: Build exact signed-install limiter and inspect both image identities
         shell: bash
         run: |
           set -Eeuo pipefail
-          : > "$RUNNER_TEMP/image-digests.txt"
-          while IFS= read -r ref; do
-            docker pull --platform linux/amd64 "$ref"
-            docker image inspect --format '{{index .RepoDigests 0}}' "$ref" | tee -a "$RUNNER_TEMP/image-digests.txt"
-          done < "$RUNNER_TEMP/image-refs.txt"
+          docker pull --platform linux/amd64 caddy:2.11.9-alpine
+          docker pull --platform linux/amd64 python:3.12.16-alpine3.24
+          mkdir -p "$RUNNER_TEMP/limiter-build"
+          cp "$RUNNER_TEMP/Dockerfile.limiter" "$RUNNER_TEMP/limiter-build/Dockerfile"
+          docker build --pull --platform linux/amd64 --tag xmesh-sub-limiter:3.12.16-krb5r1 "$RUNNER_TEMP/limiter-build"
+          {
+            docker image inspect --format '{{index .RepoDigests 0}}' caddy:2.11.9-alpine
+            docker image inspect --format '{{index .RepoDigests 0}}' python:3.12.16-alpine3.24
+            docker image inspect --format '{{.Id}}' xmesh-sub-limiter:3.12.16-krb5r1
+          } | tee "$RUNNER_TEMP/image-digests.txt"
       - name: Install pinned and checksum-verified Trivy v0.76.2
         shell: bash
         run: |
@@ -79,7 +88,7 @@ jobs:
           "$RUNNER_TEMP/trivy" image --scanners vuln --format json \
             --output "$RUNNER_TEMP/caddy-vulnerabilities.json" --no-progress caddy:2.11.9-alpine
           "$RUNNER_TEMP/trivy" image --scanners vuln --format json \
-            --output "$RUNNER_TEMP/limiter-vulnerabilities.json" --no-progress python:3.12.16-alpine3.24
+            --output "$RUNNER_TEMP/limiter-vulnerabilities.json" --no-progress xmesh-sub-limiter:3.12.16-krb5r1
       - name: Preserve evidence including any unresolved advisories
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -90,6 +99,7 @@ jobs:
             ${{ runner.temp }}/limiter-vulnerabilities.json
             ${{ runner.temp }}/image-digests.txt
             ${{ runner.temp }}/image-refs.txt
+            ${{ runner.temp }}/Dockerfile.limiter
           if-no-files-found: warn
           retention-days: 14
       - name: Fail closed on unresolved High and Critical vulnerabilities
