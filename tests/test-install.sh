@@ -21,7 +21,10 @@ grep -Fq 'xmesh-sub-limiter:' <<< "$out"
 # not unpinned major-version tags that could silently change after approval.
 grep -Fq 'image: caddy:2.11.9-alpine' <<< "$out"
 grep -Fq 'image: python:3.12.16-alpine3.24' <<< "$out"
-if grep -Eq 'image: (caddy:2|python:3\\.12-alpine)
+if grep -Eq '^    image: (caddy:2|python:3[.]12-alpine)$' <<< "$out"; then
+  echo 'ERROR: floating legacy runtime image found in rendered Compose' >&2
+  exit 1
+fi
 grep -Fq './run:/run/xmesh-sub:ro' <<< "$out"
 # The signed installer embeds the exact, audited limiter source, no unsigned
 # source fetch or module download is permitted on the Sub VPS.
