@@ -18,7 +18,11 @@ grep -Fq 'header_up -Authorization' <<< "$out"
 grep -Fq 'header_up -Cookie' <<< "$out"
 grep -Fq 'xmesh-sub-limiter:' <<< "$out"
 grep -Fq 'image: caddy:2.11.9-alpine' <<< "$out"
-grep -Fq 'image: python:3.12.16-alpine3.24' <<< "$out"
+grep -Fq 'dockerfile: Dockerfile.limiter' <<< "$out"
+grep -Fq 'pull_policy: never' <<< "$out"
+grep -Fq 'FROM python:3.12.16-alpine3.24@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89' <<< "$out"
+grep -Fq 'RUN apk --no-cache upgrade krb5-libs' <<< "$out"
+grep -Fq 'image: xmesh-sub-limiter:3.12.16-krb5r1' <<< "$out"
 if grep -Eq '^    image: (caddy:2|python:3[.]12-alpine)$' <<< "$out"; then
   echo 'ERROR: floating legacy image in signed installer' >&2
   exit 1
