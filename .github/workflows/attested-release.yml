@@ -23,7 +23,7 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: Lint and integration tests
@@ -36,6 +36,7 @@ jobs:
           python3 tests/test-manager.py
           python3 tests/test-limiter.py
           python3 tests/test-release-verify.py
+          python3 tests/test-workflow-security.py
       - name: Validate the actual generated gateway
         run: |
           bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --dry-run |
@@ -55,7 +56,7 @@ jobs:
           assert 'release_verify.stage_revision' in Path('manager.py').read_text()
           PY
       - name: Publish keyless OIDC provenance for every executable release asset
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: |
             install.sh
