@@ -123,6 +123,17 @@ FROM python:3.12.16-alpine3.24@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40
 RUN apk --no-cache upgrade krb5-libs
 DOCKER
 }
+render_caddy_dockerfile() {
+  # Caddy's official binary retains x/net 0.60.0 in this exact image.
+  # Rebuild with the patched HTML parser while retaining the stock modules,
+  # native Caddyfile syntax, ACME support and persistent /data volume.
+  cat <<'DOCKER'
+FROM caddy:2.11.9-builder-alpine AS builder
+RUN xcaddy build v2.11.9 --replace golang.org/x/net=golang.org/x/net@v0.62.0
+FROM caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+DOCKER
+}
 render_compose() {
   cat <<'YAML'
 services:
@@ -147,7 +158,11 @@ services:
       - /tmp
     # No published ports: Caddy is the only client, via a shared Unix socket.
   xmesh-sub:
-    image: caddy:2.11.9-alpine
+    image: xmesh-sub-caddy:2.11.9-xnet062r1
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
+    pull_policy: never
     container_name: xmesh-sub
     restart: unless-stopped
     depends_on:
@@ -374,6 +389,7 @@ if ((DRY_RUN)); then
   info "Validation successful, no host changes made."
   info "Panel: $PANEL | Subscription: https://$DOMAIN$SUB_PATH/{token}"
   printf '\n# Dockerfile.limiter\n'; render_limiter_dockerfile
+  printf '\n# Dockerfile.caddy\n'; render_caddy_dockerfile
   printf '\n# Caddyfile\n'; render_caddyfile
   printf '\n# compose.yaml\n'; render_compose
   printf '\n# limiter.py\n'; render_limiter
@@ -431,7 +447,8 @@ render_caddyfile >"$temp/Caddyfile"
 render_compose >"$temp/compose.yaml"
 render_limiter >"$temp/limiter.py"
   render_limiter_dockerfile >"$temp/Dockerfile.limiter"
-chmod 600 "$temp/Caddyfile" "$temp/compose.yaml" "$temp/limiter.py" "$temp/Dockerfile.limiter"
+  render_caddy_dockerfile >"$temp/Dockerfile.caddy"
+chmod 600 "$temp/Caddyfile" "$temp/compose.yaml" "$temp/limiter.py" "$temp/Dockerfile.limiter" "$temp/Dockerfile.caddy"
 if command -v python3 >/dev/null; then
   python3 -m py_compile "$temp/limiter.py" || die "Invalid edge limiter"
 fi
@@ -528,12 +545,17 @@ mkdir -p "$temp/image-build"
 cp "$temp/Dockerfile.limiter" "$temp/image-build/Dockerfile"
 docker build --pull -t xmesh-sub-limiter:3.12.16-krb5r1 "$temp/image-build" ||
   die "Could not build patched limiter image; existing deployment unchanged"
-docker run --rm -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.11.9-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ||
+mkdir -p "$temp/caddy-build"
+cp "$temp/Dockerfile.caddy" "$temp/caddy-build/Dockerfile"
+docker build --pull -t xmesh-sub-caddy:2.11.9-xnet062r1 "$temp/caddy-build" ||
+  die "Could not build patched Caddy binary; existing deployment unchanged"
+docker run --rm -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" xmesh-sub-caddy:2.11.9-xnet062r1 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ||
   die "Gateway configuration invalid, existing deployment unchanged"
 [[ ! -f "$ROOT/Caddyfile" ]] || cp -p "$ROOT/Caddyfile" "$ROOT/Caddyfile.previous"
 install -m 600 "$temp/Caddyfile" "$ROOT/Caddyfile"
 install -m 600 "$temp/compose.yaml" "$ROOT/compose.yaml"
 install -m 644 "$temp/Dockerfile.limiter" "$ROOT/Dockerfile.limiter"
+install -m 644 "$temp/Dockerfile.caddy" "$ROOT/Dockerfile.caddy"
 install -m 644 "$temp/limiter.py" "$ROOT/limiter.py"
 cd "$ROOT"
 docker compose pull --ignore-buildable
