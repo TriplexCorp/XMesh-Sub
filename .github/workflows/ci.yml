@@ -9,7 +9,9 @@ jobs:
   installer:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Syntax and ShellCheck
         run: |
           bash -n install.sh bootstrap.sh tests/test-install.sh tests/test-bootstrap.sh
@@ -31,6 +33,7 @@ jobs:
         run: |
           python3 -m py_compile release_verify.py
           python3 tests/test-release-verify.py
+          python3 tests/test-workflow-security.py
           grep -Fq 'gh attestation verify' install.sh
           grep -Fq 'stage_revision' manager.py
           python3 - <<'PY'
