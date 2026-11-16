@@ -79,13 +79,22 @@ jobs:
           fi
           grep -Fq 'github.com/go-jose/go-jose/v4' "$RUNNER_TEMP/caddy-build-info.txt" || { echo 'Expected patched JOSE-v4 missing' >&2; exit 1; }
       - name: Install pinned and checksum-verified Trivy v0.76.2
+        env:
+          TRIVY_ARCH: ${{ matrix.arch }}
         shell: bash
         run: |
           set -Eeuo pipefail
           python3 - <<'PY'
           import hashlib,io,os,pathlib,tarfile,urllib.request
-          url="https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.tar.gz"
-          wanted="bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf"
+          arch=os.environ.get("TRIVY_ARCH")
+          signed_release_assets={
+              "amd64":("Linux-64bit","bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf"),
+              "arm64":("Linux-ARM64","ab9d51f86e6a5fb936f605faff6b593ac51bc378fff4d3e8b9d58358b9c367c3"),
+          }
+          if arch not in signed_release_assets:
+              raise SystemExit("Unsupported Trivy architecture")
+          suffix,wanted=signed_release_assets[arch]
+          url=f"https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_{suffix}.tar.gz"
           with urllib.request.urlopen(url,timeout=75) as request:
               data=request.read(100*1024*1024+1)
           actual=hashlib.sha256(data).hexdigest()
