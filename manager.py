@@ -85,7 +85,7 @@ def backup_installation(root: Path = ROOT) -> Path:
     backup = Path(tempfile.mkdtemp(prefix="pre-update-", dir=str(destination)))
     backup.chmod(0o700)
     files = ("Caddyfile", "compose.yaml", "manager.py", "manager.json", "agent-key.pem", "limiter.py",
-             "release_verify.py", "RELEASE_SHA", "VERSION")
+             "release_verify.py", "RELEASE_SHA", "VERSION", "Dockerfile.limiter")
     for name in files:
         old = root / name
         if old.is_file():
@@ -97,7 +97,7 @@ def backup_installation(root: Path = ROOT) -> Path:
 
 def restore_installation(backup: Path, root: Path = ROOT) -> None:
     for name in ("Caddyfile", "compose.yaml", "manager.py", "manager.json", "agent-key.pem", "limiter.py",
-                 "release_verify.py", "RELEASE_SHA", "VERSION"):
+                 "release_verify.py", "RELEASE_SHA", "VERSION", "Dockerfile.limiter"):
         saved = backup / name
         target = root / name
         if saved.is_file():
@@ -105,7 +105,7 @@ def restore_installation(backup: Path, root: Path = ROOT) -> None:
         elif (backup / (".absent-" + name)).is_file():
             target.unlink(missing_ok=True)
     subprocess.run(["docker", "compose", "-f", str(root / "compose.yaml"),
-                    "up", "-d", "--remove-orphans"], cwd=root, check=True, timeout=180)
+                    "up", "-d", "--no-build", "--remove-orphans"], cwd=root, check=True, timeout=180)
 
 
 def signed_agent_headers(route: str, payload: bytes, key: Path = PRIVATE_KEY_FILE) -> dict:
