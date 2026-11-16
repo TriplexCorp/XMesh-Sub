@@ -114,11 +114,24 @@ $DOMAIN {
 }
 CONF
 }
+render_limiter_dockerfile() {
+  # Build once during the signed installation, not at service startup. A
+  # patched Kerberos library prevents the known krb5 1.22.2-r1 CVE inventory
+  # from lingering in the Python image even if upstream tags are stale.
+  cat <<'DOCKER'
+FROM python:3.12.16-alpine3.24@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89
+RUN apk --no-cache upgrade krb5-libs
+DOCKER
+}
 render_compose() {
   cat <<'YAML'
 services:
   xmesh-sub-limiter:
-    image: python:3.12.16-alpine3.24
+    image: xmesh-sub-limiter:3.12.16-krb5r1
+    build:
+      context: .
+      dockerfile: Dockerfile.limiter
+    pull_policy: never
     restart: unless-stopped
     user: "65534:65534"
     command: ["python3", "-I", "/opt/limiter.py"]
@@ -360,6 +373,7 @@ XMESH_LIMITER_SOURCE
 if ((DRY_RUN)); then
   info "Validation successful, no host changes made."
   info "Panel: $PANEL | Subscription: https://$DOMAIN$SUB_PATH/{token}"
+  printf '\n# Dockerfile.limiter\n'; render_limiter_dockerfile
   printf '\n# Caddyfile\n'; render_caddyfile
   printf '\n# compose.yaml\n'; render_compose
   printf '\n# limiter.py\n'; render_limiter
@@ -416,7 +430,8 @@ trap 'rm -rf "$temp"' EXIT
 render_caddyfile >"$temp/Caddyfile"
 render_compose >"$temp/compose.yaml"
 render_limiter >"$temp/limiter.py"
-chmod 600 "$temp/Caddyfile" "$temp/compose.yaml" "$temp/limiter.py"
+  render_limiter_dockerfile >"$temp/Dockerfile.limiter"
+chmod 600 "$temp/Caddyfile" "$temp/compose.yaml" "$temp/limiter.py" "$temp/Dockerfile.limiter"
 if command -v python3 >/dev/null; then
   python3 -m py_compile "$temp/limiter.py" || die "Invalid edge limiter"
 fi
@@ -507,15 +522,22 @@ if semver(new)<semver(old):
     raise SystemExit("Refusing release downgrade")
 PY
 
+# Resolve the patched runtime before replacing the running gateway.
+# The build context contains no keys, account records or verified manager code.
+mkdir -p "$temp/image-build"
+cp "$temp/Dockerfile.limiter" "$temp/image-build/Dockerfile"
+docker build --pull -t xmesh-sub-limiter:3.12.16-krb5r1 "$temp/image-build" ||
+  die "Could not build patched limiter image; existing deployment unchanged"
 docker run --rm -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.11.9-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ||
   die "Gateway configuration invalid, existing deployment unchanged"
 [[ ! -f "$ROOT/Caddyfile" ]] || cp -p "$ROOT/Caddyfile" "$ROOT/Caddyfile.previous"
 install -m 600 "$temp/Caddyfile" "$ROOT/Caddyfile"
 install -m 600 "$temp/compose.yaml" "$ROOT/compose.yaml"
+install -m 644 "$temp/Dockerfile.limiter" "$ROOT/Dockerfile.limiter"
 install -m 644 "$temp/limiter.py" "$ROOT/limiter.py"
 cd "$ROOT"
-docker compose pull
-docker compose up -d --remove-orphans
+docker compose pull --ignore-buildable
+docker compose up -d --no-build --remove-orphans
 if [[ -n "$ENROLL_TOKEN" ]]; then
   # Fresh Ed25519 identity is generated on the Sub VPS. Only the public
   # key is sent to Nexus; there is no reusable bearer credential to steal.
@@ -620,6 +642,6 @@ fi
 install -m 644 "$temp/revision/VERSION" "$ROOT/VERSION"
 info "Started. Check HTTPS health: https://$DOMAIN/healthz"
 info "Status: cd $ROOT && sudo docker compose ps"
-info "Upgrade: cd $ROOT && sudo docker compose pull && sudo docker compose up -d"
+info "Upgrade: use the signed panel update workflow; local limiter images are rebuilt by the attested installer"
 info "Do not move existing users until a canary feed is verified."
 if [[ -n "$ENROLL_TOKEN" ]]; then info "Management agent enrolled. Check its status in Nexus Subscription Studio."; fi
