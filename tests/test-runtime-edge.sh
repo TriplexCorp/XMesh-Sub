@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Disposable container integration test: generated Caddy routes + real Unix limiter.
+# Runs only in CI, never on a production VPS.
+set -Eeuo pipefail
+cd "$(dirname "$0")/.."
+[[ $# == 1 && -s "$1/Caddyfile" ]] || { echo 'Missing generated Caddyfile' >&2; exit 1; }
+source_caddyfile=$1/Caddyfile
+temp=$(mktemp -d)
+limiter_name="xmesh-edge-limiter-$$"
+caddy_name="xmesh-edge-caddy-$$"
+cleanup() {
+  docker rm -f "$caddy_name" "$limiter_name" >/dev/null 2>&1 || true
+  rm -rf "$temp"
+}
+trap cleanup EXIT
+
+mkdir -p "$temp/run" "$temp/policy"
+sudo chown 65534:65534 "$temp/run"
+chmod 0770 "$temp/run"
+printf '%s\n' '{"enabled":true,"mode":"protect","ipPerMinute":1}' > "$temp/policy/config.json"
+chmod 0644 "$temp/policy/config.json"
+
+# Keep exact generated subscriber matcher, forward_auth and sanitization,
+# replacing ONLY the TLS site address and first panel upstream for local CI.
+python3 - "$source_caddyfile" "$temp/Caddyfile" <<'PY'
+from pathlib import Path
+import sys
+raw=Path(sys.argv[1]).read_text()
+upstream='''    reverse_proxy https://panel.example.org {
+      header_up Host panel.example.org
+      header_up -Authorization
+      header_up -Cookie
+    }'''
+if raw.count(upstream)!=2 or raw.count('sub.example.org {')!=1:
+    raise SystemExit('Unexpected production Caddy routing; cannot safely stub upstream')
+if 'forward_auth unix//run/xmesh-sub/rate.sock {' not in raw:
+    raise SystemExit('Production Caddyfile has lost the Unix-socket enforcement')
+patched=raw.replace('sub.example.org {','http://:8080 {',1).replace(
+    upstream,'    respond "allowed" 200',1)
+if patched.count('forward_auth unix//run/xmesh-sub/rate.sock {')!=1:
+    raise SystemExit('CI must preserve exact forward_auth rule')
+Path(sys.argv[2]).write_text(patched)
+PY
+
+docker run -d --name "$limiter_name" --network none \
+  --user 65534:65534 --read-only --tmpfs /tmp \
+  --security-opt no-new-privileges --cap-drop ALL \
+  -v "$temp/run:/run/xmesh-sub" \
+  -v "$temp/policy:/etc/xmesh-sub/policy:ro" \
+  -v "$PWD/limiter.py:/opt/limiter.py:ro" \
+  xmesh-sub-limiter:3.12.16-krb5r1 python3 -I /opt/limiter.py >/dev/null
+for i in $(seq 1 60); do
+  [[ -S "$temp/run/rate.sock" ]] && break
+  sleep 0.2
+done
+[[ -S "$temp/run/rate.sock" ]] || { echo 'Limiter socket failed to appear' >&2; exit 1; }
+
+docker run -d --name "$caddy_name" --network bridge \
+  --security-opt no-new-privileges \
+  -p '127.0.0.1::8080' \
+  -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" \
+  -v "$temp/run:/run/xmesh-sub:ro" \
+  xmesh-sub-caddy:2.11.9-josev4r1 caddy run --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
+
+address=$(docker port "$caddy_name" 8080/tcp | head -n 1)
+[[ "$address" =~ ^127[.]0[.]0[.]1:[0-9]+$ ]] || { echo 'Unexpected local-only Caddy binding' >&2; exit 1; }
+base="http://$address"
+for i in $(seq 1 60); do
+  [[ $(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$base/healthz") == 200 ]] && break
+  sleep 0.2
+done
+status() {
+  curl -sS -o /dev/null -w '%{http_code}' --max-time 6 "$@"
+}
+[[ $(status "$base/healthz") == 200 ]] || { echo 'Health endpoint not reachable' >&2; exit 1; }
+[[ $(status "$base/api/admin") == 404 ]] || { echo 'Admin path leaked through subscription ingress' >&2; exit 1; }
+[[ $(status "$base/s/not-a-token") == 404 ]] || { echo 'Invalid subscription route was accepted' >&2; exit 1; }
+token=$(printf 'a%.0s' {1..64})
+route="$base/s/$token"
+[[ $(status "$route") == 200 ]] || { echo 'First allowed subscription request failed' >&2; exit 1; }
+[[ $(status -H 'X-Forwarded-For: 198.51.100.4' "$route") == 429 ]] ||
+  { echo 'Client spoofed XFF to bypass direct-peer rate limit' >&2; exit 1; }
+[[ $(status -H 'X-XMesh-Peer-IP: 198.51.100.55' "$route") == 429 ]] ||
+  { echo 'Client spoofed internal peer-IP header to bypass rate limit' >&2; exit 1; }
+echo 'Verified: Caddy routes, private Unix gate and spoof-resistant per-peer HTTP 429'
