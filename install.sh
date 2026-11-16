@@ -128,7 +128,7 @@ render_caddy_dockerfile() {
   # Rebuild Caddy using the upstream Smallstep JOSE-v4 migration and patched
   # x/net; retain stock Caddy modules, native Caddyfile syntax and ACME.
   cat <<'DOCKER'
-FROM caddy:2.11.9-builder-alpine AS builder
+FROM caddy:2.11.9-builder-alpine@sha256:646fee578e680989ca5c7fd1ce6f1de574d19fd71ef2221810cc0510a9f40c86 AS builder
 RUN xcaddy build v2.11.9 \
     --replace github.com/smallstep/certificates=github.com/smallstep/certificates@v0.30.3-0.20261105213751-6d5a251fbe01 \
     --replace go.step.sm/crypto=go.step.sm/crypto@v0.92.0 \
