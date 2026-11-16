@@ -29,15 +29,15 @@ class WorkflowSecurityTests(unittest.TestCase):
 
     def test_only_reviewed_local_reusable_gate_is_allowed(self):
         self.assertEqual(unpinned_actions(
-            "    uses: ./.github/workflows/image-security.yml\\n"
+            "    uses: ./.github/workflows/image-security.yml\n"
         ), [])
-        self.assertTrue(unpinned_actions("    uses: ./.github/workflows/unsafe.yml\\n"))
+        self.assertTrue(unpinned_actions("    uses: ./.github/workflows/unsafe.yml\n"))
 
     def test_attester_cannot_publish_before_two_architecture_security_gates(self):
         publisher = (ROOT / ".github/workflows/attested-release.yml").read_text()
         gate = (ROOT / ".github/workflows/image-security.yml").read_text()
         self.assertIn("uses: ./.github/workflows/image-security.yml", publisher)
-        self.assertRegex(publisher, r"(?m)^  publish:\\n    needs: runtime-image-security\\n")
+        self.assertRegex(publisher, r"(?m)^  publish:\n    needs: runtime-image-security\n")
         self.assertRegex(gate, r"(?m)^  workflow_call:$")
         self.assertIn("arch: amd64", gate)
         self.assertIn("arch: arm64", gate)
