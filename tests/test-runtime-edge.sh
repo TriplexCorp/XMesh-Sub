@@ -9,9 +9,9 @@ temp=$(mktemp -d)
 # Disposable non-secret fixtures must be traversable by container uid 65534.
 # The socket itself remains under a uid-65534 owned, mode-0770 subdirectory.
 chmod 0755 "$temp"
-limiter_name="xmesh-edge-limiter-$"
-caddy_name="xmesh-edge-caddy-$"
-socket_volume="xmesh-edge-socket-$"
+limiter_name="xmesh-edge-limiter-$$"
+caddy_name="xmesh-edge-caddy-$$"
+socket_volume="xmesh-edge-socket-$$"
 cleanup() {
   docker rm -f "$caddy_name" "$limiter_name" >/dev/null 2>&1 || true
   docker volume rm -f "$socket_volume" >/dev/null 2>&1 || true
