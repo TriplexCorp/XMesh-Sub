@@ -6,10 +6,15 @@ cd "$(dirname "$0")/.."
 [[ $# == 1 && -s "$1/Caddyfile" ]] || { echo 'Missing generated Caddyfile' >&2; exit 1; }
 source_caddyfile=$1/Caddyfile
 temp=$(mktemp -d)
+# Disposable non-secret fixtures must be traversable by container uid 65534.
+# The socket itself remains under a uid-65534 owned, mode-0770 subdirectory.
+chmod 0755 "$temp"
 limiter_name="xmesh-edge-limiter-$$"
 caddy_name="xmesh-edge-caddy-$$"
 cleanup() {
   docker rm -f "$caddy_name" "$limiter_name" >/dev/null 2>&1 || true
+  # Regain ownership of the disposable socket directory before cleanup.
+  sudo chown -R "$(id -u):$(id -g)" "$temp" 2>/dev/null || true
   rm -rf "$temp"
 }
 trap cleanup EXIT
@@ -53,7 +58,14 @@ for ((attempt=0; attempt<60; attempt++)); do
   [[ -S "$temp/run/rate.sock" ]] && break
   sleep 0.2
 done
-[[ -S "$temp/run/rate.sock" ]] || { echo 'Limiter socket failed to appear' >&2; exit 1; }
+if [[ ! -S "$temp/run/rate.sock" ]]; then
+  echo 'Limiter socket failed to appear; diagnostic container status and logs:' >&2
+  docker inspect --format '{{.State.Status}} {{.State.ExitCode}} {{.State.Error}}' "$limiter_name" >&2 || true
+  docker logs "$limiter_name" >&2 || true
+  echo 'Fixture permissions:' >&2
+  stat -c '%a %u:%g %n' "$temp" "$temp/run" "$temp/policy" "$temp/policy/config.json" >&2 || true
+  exit 1
+fi
 
 docker run -d --name "$caddy_name" --network bridge \
   --security-opt no-new-privileges \
