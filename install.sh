@@ -118,7 +118,7 @@ render_compose() {
   cat <<'YAML'
 services:
   xmesh-sub-limiter:
-    image: python:3.12-alpine
+    image: python:3.12.16-alpine3.24
     restart: unless-stopped
     user: "65534:65534"
     command: ["python3", "-I", "/opt/limiter.py"]
@@ -134,7 +134,7 @@ services:
       - /tmp
     # No published ports: Caddy is the only client, via a shared Unix socket.
   xmesh-sub:
-    image: caddy:2
+    image: caddy:2.11.9-alpine
     container_name: xmesh-sub
     restart: unless-stopped
     depends_on:
@@ -507,7 +507,7 @@ if semver(new)<semver(old):
     raise SystemExit("Refusing release downgrade")
 PY
 
-docker run --rm -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ||
+docker run --rm -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.11.9-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ||
   die "Gateway configuration invalid, existing deployment unchanged"
 [[ ! -f "$ROOT/Caddyfile" ]] || cp -p "$ROOT/Caddyfile" "$ROOT/Caddyfile.previous"
 install -m 600 "$temp/Caddyfile" "$ROOT/Caddyfile"
