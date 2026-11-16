@@ -49,7 +49,7 @@ jobs:
               raise SystemExit("Signed installer did not render the pinned patched limiter Dockerfile")
           pathlib.Path(os.environ["RUNNER_TEMP"],"Dockerfile.limiter").write_text(dockerfile)
           caddyfile=pathlib.Path(os.environ["RUNNER_TEMP"],"sub-dry-run").read_text().split("# Dockerfile.caddy\n",1)[1].split("\n# Caddyfile\n",1)[0]
-          if not all(item in caddyfile for item in ("FROM caddy:2.11.9-builder-alpine", "xcaddy build v2.11.9", "github.com/smallstep/certificates@v0.30.3-0.20261105213751-6d5a251fbe01", "go.step.sm/crypto@v0.92.0", "golang.org/x/net@v0.62.0")):
+          if not all(item in caddyfile for item in ("FROM caddy:2.11.9-builder-alpine@sha256:646fee578e680989ca5c7fd1ce6f1de574d19fd71ef2221810cc0510a9f40c86", "xcaddy build v2.11.9", "github.com/smallstep/certificates@v0.30.3-0.20261105213751-6d5a251fbe01", "go.step.sm/crypto@v0.92.0", "golang.org/x/net@v0.62.0")):
               raise SystemExit("Signed installer did not render patched Caddy builder")
           pathlib.Path(os.environ["RUNNER_TEMP"],"Dockerfile.caddy").write_text(caddyfile)
           print("Verified both signed-installer image references")
