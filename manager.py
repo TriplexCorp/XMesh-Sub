@@ -85,7 +85,7 @@ def backup_installation(root: Path = ROOT) -> Path:
     backup = Path(tempfile.mkdtemp(prefix="pre-update-", dir=str(destination)))
     backup.chmod(0o700)
     files = ("Caddyfile", "compose.yaml", "manager.py", "manager.json", "agent-key.pem", "limiter.py",
-             "release_verify.py", "RELEASE_SHA", "VERSION", "Dockerfile.limiter")
+             "release_verify.py", "RELEASE_SHA", "VERSION", "Dockerfile.limiter", "Dockerfile.caddy")
     for name in files:
         old = root / name
         if old.is_file():
@@ -97,7 +97,7 @@ def backup_installation(root: Path = ROOT) -> Path:
 
 def restore_installation(backup: Path, root: Path = ROOT) -> None:
     for name in ("Caddyfile", "compose.yaml", "manager.py", "manager.json", "agent-key.pem", "limiter.py",
-                 "release_verify.py", "RELEASE_SHA", "VERSION", "Dockerfile.limiter"):
+                 "release_verify.py", "RELEASE_SHA", "VERSION", "Dockerfile.limiter", "Dockerfile.caddy"):
         saved = backup / name
         target = root / name
         if saved.is_file():
