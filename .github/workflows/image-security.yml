@@ -31,30 +31,38 @@ jobs:
           import os, pathlib, re
           compose=pathlib.Path(os.environ["RUNNER_TEMP"],"compose.yaml").read_text()
           refs=re.findall(r"^\s+image:\s+(\S+)\s*$",compose,re.M)
-          allowed=("xmesh-sub-limiter:3.12.16-krb5r1","caddy:2.11.9-alpine")
+          allowed=("xmesh-sub-limiter:3.12.16-krb5r1","xmesh-sub-caddy:2.11.9-xnet062r1")
           if len(refs)!=2 or set(refs)!=set(allowed):
               raise SystemExit(f"Unexpected installer runtime images: {refs}")
           pathlib.Path(os.environ["RUNNER_TEMP"],"image-refs.txt").write_text("\n".join(refs)+"\n")
-          dockerfile=pathlib.Path(os.environ["RUNNER_TEMP"],"sub-dry-run").read_text().split("# Dockerfile.limiter\n",1)[1].split("\n# Caddyfile\n",1)[0]
+          dockerfile=pathlib.Path(os.environ["RUNNER_TEMP"],"sub-dry-run").read_text().split("# Dockerfile.limiter\n",1)[1].split("\n# Dockerfile.caddy\n",1)[0]
           if "FROM python:3.12.16-alpine3.24@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89" not in dockerfile or "apk --no-cache upgrade krb5-libs" not in dockerfile:
               raise SystemExit("Signed installer did not render the pinned patched limiter Dockerfile")
           pathlib.Path(os.environ["RUNNER_TEMP"],"Dockerfile.limiter").write_text(dockerfile)
+          caddyfile=pathlib.Path(os.environ["RUNNER_TEMP"],"sub-dry-run").read_text().split("# Dockerfile.caddy\n",1)[1].split("\n# Caddyfile\n",1)[0]
+          if "FROM caddy:2.11.9-builder-alpine" not in caddyfile or "xcaddy build v2.11.9 --replace golang.org/x/net=golang.org/x/net@v0.62.0" not in caddyfile:
+              raise SystemExit("Signed installer did not render patched Caddy builder")
+          pathlib.Path(os.environ["RUNNER_TEMP"],"Dockerfile.caddy").write_text(caddyfile)
           print("Verified both signed-installer image references")
           PY
-      - name: Build exact signed-install limiter and inspect both image identities
+      - name: Build both signed-installer runtime containers
         shell: bash
         run: |
           set -Eeuo pipefail
           docker pull --platform linux/amd64 caddy:2.11.9-alpine
           docker pull --platform linux/amd64 python:3.12.16-alpine3.24
-          mkdir -p "$RUNNER_TEMP/limiter-build"
+          mkdir -p "$RUNNER_TEMP/limiter-build" "$RUNNER_TEMP/caddy-build"
           cp "$RUNNER_TEMP/Dockerfile.limiter" "$RUNNER_TEMP/limiter-build/Dockerfile"
+          cp "$RUNNER_TEMP/Dockerfile.caddy" "$RUNNER_TEMP/caddy-build/Dockerfile"
           docker build --pull --platform linux/amd64 --tag xmesh-sub-limiter:3.12.16-krb5r1 "$RUNNER_TEMP/limiter-build"
+          docker build --pull --platform linux/amd64 --tag xmesh-sub-caddy:2.11.9-xnet062r1 "$RUNNER_TEMP/caddy-build"
           {
             docker image inspect --format '{{index .RepoDigests 0}}' caddy:2.11.9-alpine
             docker image inspect --format '{{index .RepoDigests 0}}' python:3.12.16-alpine3.24
             docker image inspect --format '{{.Id}}' xmesh-sub-limiter:3.12.16-krb5r1
+            docker image inspect --format '{{.Id}}' xmesh-sub-caddy:2.11.9-xnet062r1
           } | tee "$RUNNER_TEMP/image-digests.txt"
+          docker run --rm -v "$RUNNER_TEMP/sub-dry-run:/tmp/ignore:ro" xmesh-sub-caddy:2.11.9-xnet062r1 caddy version
       - name: Install pinned and checksum-verified Trivy v0.76.2
         shell: bash
         run: |
@@ -86,7 +94,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           "$RUNNER_TEMP/trivy" image --scanners vuln --format json \
-            --output "$RUNNER_TEMP/caddy-vulnerabilities.json" --no-progress caddy:2.11.9-alpine
+            --output "$RUNNER_TEMP/caddy-vulnerabilities.json" --no-progress xmesh-sub-caddy:2.11.9-xnet062r1
           "$RUNNER_TEMP/trivy" image --scanners vuln --format json \
             --output "$RUNNER_TEMP/limiter-vulnerabilities.json" --no-progress xmesh-sub-limiter:3.12.16-krb5r1
       - name: Preserve evidence including any unresolved advisories
@@ -100,6 +108,7 @@ jobs:
             ${{ runner.temp }}/image-digests.txt
             ${{ runner.temp }}/image-refs.txt
             ${{ runner.temp }}/Dockerfile.limiter
+            ${{ runner.temp }}/Dockerfile.caddy
           if-no-files-found: warn
           retention-days: 14
       - name: Fail closed on unresolved High and Critical vulnerabilities
