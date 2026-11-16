@@ -41,7 +41,7 @@ jobs:
         run: |
           bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --dry-run |
             sed -n '/^# Caddyfile$/,/^# compose.yaml$/p' | sed '1d;$d' > Caddyfile
-          docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.11.9-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - name: Enforce immutable release contract
         run: |
           python3 - <<'PY'
