@@ -1,0 +1,113 @@
+name: Sub deployable image CVE gate
+on:
+  pull_request:
+    paths:
+      - 'install.sh'
+      - 'tests/test-install.sh'
+      - '.github/workflows/image-security.yml'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/attested-release.yml'
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  image-cve-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Fetch exact source without persistent credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify images rendered by signed installer
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --dry-run > "$RUNNER_TEMP/sub-dry-run"
+          sed -n '/^# compose.yaml$/,/^# limiter.py$/p' "$RUNNER_TEMP/sub-dry-run" | sed '1d;$d' > "$RUNNER_TEMP/compose.yaml"
+          python3 - <<'PY'
+          import os, pathlib, re
+          compose=pathlib.Path(os.environ["RUNNER_TEMP"],"compose.yaml").read_text()
+          refs=re.findall(r"^\s+image:\s+(\S+)\s*$",compose,re.M)
+          allowed=("python:3.12.16-alpine3.24","caddy:2.11.9-alpine")
+          if len(refs)!=2 or set(refs)!=set(allowed):
+              raise SystemExit(f"Unexpected installer runtime images: {refs}")
+          pathlib.Path(os.environ["RUNNER_TEMP"],"image-refs.txt").write_text("\n".join(refs)+"\n")
+          print("Verified both signed-installer image references")
+          PY
+      - name: Pull and record actual image content digests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          : > "$RUNNER_TEMP/image-digests.txt"
+          while IFS= read -r ref; do
+            docker pull --platform linux/amd64 "$ref"
+            docker image inspect --format '{{index .RepoDigests 0}}' "$ref" | tee -a "$RUNNER_TEMP/image-digests.txt"
+          done < "$RUNNER_TEMP/image-refs.txt"
+      - name: Install pinned and checksum-verified Trivy v0.76.2
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,io,os,pathlib,tarfile,urllib.request
+          url="https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.tar.gz"
+          wanted="bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf"
+          with urllib.request.urlopen(url,timeout=75) as request:
+              data=request.read(100*1024*1024+1)
+          if len(data)>100*1024*1024 or hashlib.sha256(data).hexdigest()!=wanted:
+              raise SystemExit("Trivy tarball failed pinned SHA-256/size validation")
+          with tarfile.open(fileobj=io.BytesIO(data),mode="r:gz") as tar:
+              entry=tar.getmember("trivy")
+              if not entry.isfile() or not 0<entry.size<100*1024*1024:
+                  raise SystemExit("Unexpected Trivy executable")
+              extracted=tar.extractfile(entry)
+              if extracted is None: raise SystemExit("Trivy binary missing")
+              target=pathlib.Path(os.environ["RUNNER_TEMP"])/"trivy"
+              target.write_bytes(extracted.read(100*1024*1024+1))
+              target.chmod(0o700)
+          PY
+      - name: Scan both exact deployable runtime images
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          "$RUNNER_TEMP/trivy" image --scanners vuln --format json \
+            --output "$RUNNER_TEMP/caddy-vulnerabilities.json" --no-progress caddy:2.11.9-alpine
+          "$RUNNER_TEMP/trivy" image --scanners vuln --format json \
+            --output "$RUNNER_TEMP/limiter-vulnerabilities.json" --no-progress python:3.12.16-alpine3.24
+      - name: Preserve evidence including any unresolved advisories
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sub-runtime-image-security
+          path: |
+            ${{ runner.temp }}/caddy-vulnerabilities.json
+            ${{ runner.temp }}/limiter-vulnerabilities.json
+            ${{ runner.temp }}/image-digests.txt
+            ${{ runner.temp }}/image-refs.txt
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Fail closed on unresolved High and Critical vulnerabilities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import collections,json,os,pathlib
+          folder=pathlib.Path(os.environ["RUNNER_TEMP"])
+          count=0
+          for file in ("caddy-vulnerabilities.json","limiter-vulnerabilities.json"):
+              report=json.loads((folder/file).read_text())
+              vulnerabilities=[v for target in report.get("Results",[]) for v in target.get("Vulnerabilities",[])]
+              totals=collections.Counter(v.get("Severity","UNKNOWN") for v in vulnerabilities)
+              print(f"{file}: {dict(totals)}")
+              high=[v for v in vulnerabilities if v.get("Severity") in ("HIGH","CRITICAL")]
+              count+=len(high)
+              for v in high:
+                  print("UNRESOLVED",file,v.get("VulnerabilityID"),v.get("PkgName"),
+                        "installed="+str(v.get("InstalledVersion")),
+                        "fixed="+str(v.get("FixedVersion") or "UNAVAILABLE"))
+          if count:
+              raise SystemExit(f"{count} High/Critical issues remain in Sub runtime images")
+          print("Verified: no High/Critical advisories in scanned exact-runtime-image digests")
+          PY
