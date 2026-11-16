@@ -15,8 +15,8 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$temp/run" "$temp/policy"
-sudo chown 65534:65534 "$temp/run"
 chmod 0770 "$temp/run"
+sudo chown 65534:65534 "$temp/run"
 printf '%s\n' '{"enabled":true,"mode":"protect","ipPerMinute":1}' > "$temp/policy/config.json"
 chmod 0644 "$temp/policy/config.json"
 
