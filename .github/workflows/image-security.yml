@@ -4,6 +4,7 @@ on:
     paths:
       - 'install.sh'
       - 'tests/test-install.sh'
+      - 'tests/test-runtime-edge.sh'
       - '.github/workflows/image-security.yml'
       - '.github/workflows/ci.yml'
       - '.github/workflows/attested-release.yml'
@@ -82,6 +83,9 @@ jobs:
             exit 1
           fi
           grep -Fq 'github.com/go-jose/go-jose/v4' "$RUNNER_TEMP/caddy-build-info.txt" || { echo 'Expected patched JOSE-v4 missing' >&2; exit 1; }
+      - name: Exercise real Caddy and Unix limiter against spoofed client headers
+        shell: bash
+        run: bash tests/test-runtime-edge.sh "$RUNNER_TEMP"
       - name: Install pinned and checksum-verified Trivy v0.76.2
         env:
           TRIVY_ARCH: ${{ matrix.arch }}
