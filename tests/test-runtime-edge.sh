@@ -62,6 +62,9 @@ if [[ ! -S "$temp/run/rate.sock" ]]; then
   echo 'Limiter socket failed to appear; diagnostic container status and logs:' >&2
   docker inspect --format '{{.State.Status}} {{.State.ExitCode}} {{.State.Error}}' "$limiter_name" >&2 || true
   docker logs "$limiter_name" >&2 || true
+  echo 'Inspect container process, bind mounts and socket:' >&2
+  docker inspect --format '{{json .Mounts}} {{json .Config.Cmd}} {{json .Config.Entrypoint}}' "$limiter_name" >&2 || true
+  docker exec "$limiter_name" sh -c 'id; ls -ld /run/xmesh-sub /etc/xmesh-sub/policy; ls -al /run/xmesh-sub; ps aux' >&2 || true
   echo 'Fixture permissions:' >&2
   stat -c '%a %u:%g %n' "$temp" "$temp/run" "$temp/policy" "$temp/policy/config.json" >&2 || true
   exit 1
