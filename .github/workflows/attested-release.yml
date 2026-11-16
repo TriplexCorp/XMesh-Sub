@@ -36,8 +36,8 @@ jobs:
           persist-credentials: false
       - name: Lint and integration tests
         run: |
-          bash -n install.sh bootstrap.sh tests/test-install.sh tests/test-bootstrap.sh
-          shellcheck -s bash install.sh bootstrap.sh tests/test-install.sh tests/test-bootstrap.sh
+          bash -n install.sh bootstrap.sh tests/test-install.sh tests/test-bootstrap.sh tests/test-runtime-edge.sh
+          shellcheck -s bash install.sh bootstrap.sh tests/test-install.sh tests/test-bootstrap.sh tests/test-runtime-edge.sh
           bash tests/test-install.sh
           bash tests/test-bootstrap.sh
           python3 -m py_compile manager.py release_verify.py limiter.py
