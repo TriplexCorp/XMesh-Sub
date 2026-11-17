@@ -22,7 +22,7 @@ jobs:
           bash tests/test-bootstrap.sh
       - name: Outbound signed agent and edge IP limiter tests
         run: |
-          python3 -m py_compile manager.py limiter.py
+          python3 -m py_compile manager.py limiter.py tests/test-image-rollback.py
           python3 tests/test-manager.py
           python3 tests/test-limiter.py
       - name: Validate rendered Caddy configuration
