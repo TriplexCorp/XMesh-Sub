@@ -42,7 +42,9 @@ grep -Fq 'go.step.sm/crypto@v0.92.0' <<< "$out"
 grep -Fq 'golang.org/x/net@v0.62.0' <<< "$out"
 grep -Fq 'FROM caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0' <<< "$out"
 # The production installer must not overwrite old mutable local image tags.
+# shellcheck disable=SC2016 # Literal installer source assertion, not interpolation.
 grep -Fq 'docker image inspect "$limiter_image"' install.sh
+# shellcheck disable=SC2016
 grep -Fq 'docker image inspect "$caddy_image"' install.sh
 if grep -Eq '^    image: (caddy:2|python:3[.]12-alpine)$' <<< "$out"; then
   echo 'ERROR: floating legacy image in signed installer' >&2
