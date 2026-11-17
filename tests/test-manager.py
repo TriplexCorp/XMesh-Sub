@@ -297,7 +297,7 @@ class ManagerTest(unittest.TestCase):
 
     def test_updated_gateway_requires_real_https_health_after_both_services_run(self):
         with patch.object(manager, "_docker_output",
-                          return_value="xmesh-sub-limiter\\nxmesh-sub"), \
+                          return_value="xmesh-sub-limiter\nxmesh-sub"), \
              patch.object(manager, "verified_open") as request:
             response = request.return_value.__enter__.return_value
             response.status = 200
