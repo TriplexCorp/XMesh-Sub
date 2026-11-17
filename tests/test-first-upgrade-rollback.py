@@ -44,8 +44,8 @@ def compose_image(caddy, limiter, *, https_gateway=False):
         "      - '127.0.0.1::8443'\n"
         "    volumes:\n"
         "      - ./Caddyfile:/etc/caddy/Caddyfile:ro\n"
-        "      - ./caddy-data:/data\n"
-        "      - ./caddy-config:/config\n"
+        "      - caddy-data:/data\n"
+        "      - caddy-config:/config\n"
     ) if https_gateway else (
         "    entrypoint: ['sh', '-c', 'sleep 300']\n"
         "    command: []\n"
@@ -61,6 +61,7 @@ def compose_image(caddy, limiter, *, https_gateway=False):
         f"    pull_policy: never\n"
         f"    entrypoint: ['sh', '-c', 'sleep 300']\n"
         f"    command: []\n"
+        + ("volumes:\n  caddy-data:\n  caddy-config:\n" if https_gateway else "")
     )
 
 
@@ -210,7 +211,7 @@ def main():
         finally:
             if (root / "compose.yaml").exists():
                 subprocess.run(["docker", "compose", "-f", str(root / "compose.yaml"),
-                                "down", "--remove-orphans"], capture_output=True, timeout=60)
+                                "down", "--volumes", "--remove-orphans"], capture_output=True, timeout=60)
             for tag in created:
                 subprocess.run(["docker", "image", "rm", tag],
                                capture_output=True, timeout=20)
