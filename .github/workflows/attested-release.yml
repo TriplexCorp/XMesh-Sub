@@ -14,7 +14,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  runtime-image-security:
+    # Reuse the exact two-architecture CVE gate on the trusted main revision.
+    # No signing or OIDC token is available to this job.
+    permissions:
+      contents: read
+    uses: ./.github/workflows/image-security.yml
+
   publish:
+    needs: runtime-image-security
     if: github.repository == 'TriplexCorp/XMesh-Sub' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
@@ -28,8 +36,8 @@ jobs:
           persist-credentials: false
       - name: Lint and integration tests
         run: |
-          bash -n install.sh bootstrap.sh tests/test-install.sh tests/test-bootstrap.sh
-          shellcheck -s bash install.sh bootstrap.sh tests/test-install.sh tests/test-bootstrap.sh
+          bash -n install.sh bootstrap.sh tests/test-install.sh tests/test-bootstrap.sh tests/test-runtime-edge.sh
+          shellcheck -s bash install.sh bootstrap.sh tests/test-install.sh tests/test-bootstrap.sh tests/test-runtime-edge.sh
           bash tests/test-install.sh
           bash tests/test-bootstrap.sh
           python3 -m py_compile manager.py release_verify.py limiter.py
@@ -41,7 +49,7 @@ jobs:
         run: |
           bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --dry-run |
             sed -n '/^# Caddyfile$/,/^# compose.yaml$/p' | sed '1d;$d' > Caddyfile
-          docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.11.9-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - name: Enforce immutable release contract
         run: |
           python3 - <<'PY'

@@ -17,6 +17,39 @@ grep -Fq 'header_up -X-Forwarded-Uri' <<< "$out"
 grep -Fq 'header_up -Authorization' <<< "$out"
 grep -Fq 'header_up -Cookie' <<< "$out"
 grep -Fq 'xmesh-sub-limiter:' <<< "$out"
+# Even first-install dry-run receives a deterministic test-only revision.
+test_sha=0000000000000000000000000000000000000000
+grep -Fq "image: xmesh-sub-caddy:rev-$test_sha" <<< "$out"
+grep -Fq "image: xmesh-sub-limiter:rev-$test_sha" <<< "$out"
+# Distinct signed revisions must have distinct image names, and placeholders
+# must never survive into a runnable Compose file.
+another_sha=1111111111111111111111111111111111111111
+out_alt=$(bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --release-sha "$another_sha" --dry-run)
+grep -Fq "image: xmesh-sub-caddy:rev-$another_sha" <<< "$out_alt"
+grep -Fq "image: xmesh-sub-limiter:rev-$another_sha" <<< "$out_alt"
+if grep -Fq "@CADDY_IMAGE@" <<< "$out_alt" || grep -Fq "@LIMITER_IMAGE@" <<< "$out_alt"; then
+  echo "ERROR: unresolved image names in installer output" >&2; exit 1
+fi
+grep -Fq 'dockerfile: Dockerfile.limiter' <<< "$out"
+grep -Fq 'pull_policy: never' <<< "$out"
+grep -Fq 'FROM python:3.12.16-alpine3.24@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89' <<< "$out"
+grep -Fq 'RUN apk --no-cache upgrade krb5-libs' <<< "$out"
+grep -Fq 'dockerfile: Dockerfile.caddy' <<< "$out"
+grep -Fq 'FROM caddy:2.11.9-builder-alpine@sha256:646fee578e680989ca5c7fd1ce6f1de574d19fd71ef2221810cc0510a9f40c86 AS builder' <<< "$out"
+grep -Fq 'RUN xcaddy build v2.11.9' <<< "$out"
+grep -Fq 'github.com/smallstep/certificates@v0.30.3-0.20261105213751-6d5a251fbe01' <<< "$out"
+grep -Fq 'go.step.sm/crypto@v0.92.0' <<< "$out"
+grep -Fq 'golang.org/x/net@v0.62.0' <<< "$out"
+grep -Fq 'FROM caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0' <<< "$out"
+# The production installer must not overwrite old mutable local image tags.
+# shellcheck disable=SC2016 # Literal installer source assertion, not interpolation.
+grep -Fq 'docker image inspect "$limiter_image"' install.sh
+# shellcheck disable=SC2016
+grep -Fq 'docker image inspect "$caddy_image"' install.sh
+if grep -Eq '^    image: (caddy:2|python:3[.]12-alpine)$' <<< "$out"; then
+  echo 'ERROR: floating legacy image in signed installer' >&2
+  exit 1
+fi
 grep -Fq './run:/run/xmesh-sub:ro' <<< "$out"
 # The signed installer embeds the exact, audited limiter source, no unsigned
 # source fetch or module download is permitted on the Sub VPS.

@@ -114,11 +114,51 @@ $DOMAIN {
 }
 CONF
 }
+render_limiter_dockerfile() {
+  # Build once during the signed installation, not at service startup. A
+  # patched Kerberos library prevents the known krb5 1.22.2-r1 CVE inventory
+  # from lingering in the Python image even if upstream tags are stale.
+  cat <<'DOCKER'
+FROM python:3.12.16-alpine3.24@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89
+RUN apk --no-cache upgrade krb5-libs
+DOCKER
+}
+render_caddy_dockerfile() {
+  # Caddy's official binary retains x/net 0.60.0 in this exact image.
+  # Rebuild Caddy using the upstream Smallstep JOSE-v4 migration and patched
+  # x/net; retain stock Caddy modules, native Caddyfile syntax and ACME.
+  cat <<'DOCKER'
+FROM caddy:2.11.9-builder-alpine@sha256:646fee578e680989ca5c7fd1ce6f1de574d19fd71ef2221810cc0510a9f40c86 AS builder
+RUN xcaddy build v2.11.9 \
+    --replace github.com/smallstep/certificates=github.com/smallstep/certificates@v0.30.3-0.20261105213751-6d5a251fbe01 \
+    --replace go.step.sm/crypto=go.step.sm/crypto@v0.92.0 \
+    --replace golang.org/x/net=golang.org/x/net@v0.62.0
+FROM caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+DOCKER
+}
+# Every attested revision has immutable local image names. In particular,
+# the FIRST upgrade from an old manager must never overwrite the Docker tags
+# required to recover the previous running configuration.
+image_release_tag() {
+  local sha=${RELEASE_SHA:-0000000000000000000000000000000000000000}
+  [[ "$sha" =~ ^[a-f0-9]{40}$ ]] || die "Invalid immutable image release revision"
+  printf 'rev-%s' "$sha"
+}
+sub_limiter_image() { printf 'xmesh-sub-limiter:%s' "$(image_release_tag)"; }
+sub_caddy_image() { printf 'xmesh-sub-caddy:%s' "$(image_release_tag)"; }
 render_compose() {
-  cat <<'YAML'
+  local limiter_image caddy_image
+  limiter_image=$(sub_limiter_image)
+  caddy_image=$(sub_caddy_image)
+  cat <<'YAML' | sed -e "s|@LIMITER_IMAGE@|$limiter_image|g" -e "s|@CADDY_IMAGE@|$caddy_image|g"
 services:
   xmesh-sub-limiter:
-    image: python:3.12-alpine
+    image: @LIMITER_IMAGE@
+    build:
+      context: .
+      dockerfile: Dockerfile.limiter
+    pull_policy: never
     restart: unless-stopped
     user: "65534:65534"
     command: ["python3", "-I", "/opt/limiter.py"]
@@ -134,7 +174,11 @@ services:
       - /tmp
     # No published ports: Caddy is the only client, via a shared Unix socket.
   xmesh-sub:
-    image: caddy:2
+    image: @CADDY_IMAGE@
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
+    pull_policy: never
     container_name: xmesh-sub
     restart: unless-stopped
     depends_on:
@@ -360,6 +404,8 @@ XMESH_LIMITER_SOURCE
 if ((DRY_RUN)); then
   info "Validation successful, no host changes made."
   info "Panel: $PANEL | Subscription: https://$DOMAIN$SUB_PATH/{token}"
+  printf '\n# Dockerfile.limiter\n'; render_limiter_dockerfile
+  printf '\n# Dockerfile.caddy\n'; render_caddy_dockerfile
   printf '\n# Caddyfile\n'; render_caddyfile
   printf '\n# compose.yaml\n'; render_compose
   printf '\n# limiter.py\n'; render_limiter
@@ -412,11 +458,51 @@ if [[ ! -e "$ROOT/edge-policy/config.json" ]]; then
   chmod 644 "$ROOT/edge-policy/config.json"
 fi
 temp=$(mktemp -d "$ROOT/.install.XXXXXXXX")
-trap 'rm -rf "$temp"' EXIT
+SERVICE_UNIT=/etc/systemd/system/xmesh-sub-manager.service
+existing_install=0
+install_mutated=0
+# The first updater may be a PRE-remediation manager, which does not know how
+# to save images/configuration. The signed INSTALLER must protect that upgrade.
+# Rollback data contains private keys: the entire staging directory is 0700.
+installer_exit() {
+  local status=$1 name
+  trap - EXIT
+  if ((status != 0 && existing_install == 1 && install_mutated == 1)); then
+    printf 'XMesh Sub: update failed; restoring previous gateway deployment\n' >&2
+    set +e
+    for name in Caddyfile compose.yaml Dockerfile.limiter Dockerfile.caddy limiter.py manager.py release_verify.py RELEASE_SHA VERSION agent-key.pem manager.json; do
+      if [[ -f "$temp/previous/$name" ]]; then
+        cp -p -- "$temp/previous/$name" "$ROOT/$name" ||
+          printf 'XMesh Sub: rollback ERROR restoring %s\n' "$name" >&2
+      elif [[ -f "$temp/previous/.absent-$name" ]]; then
+        rm -f -- "$ROOT/$name" ||
+          printf 'XMesh Sub: rollback ERROR removing %s\n' "$name" >&2
+      fi
+    done
+    if [[ -f "$temp/previous/xmesh-sub-manager.service" ]]; then
+      cp -p -- "$temp/previous/xmesh-sub-manager.service" "$SERVICE_UNIT"
+    elif [[ -f "$temp/previous/.absent-xmesh-sub-manager.service" ]]; then
+      rm -f "$SERVICE_UNIT"
+    fi
+    systemctl daemon-reload
+    if ! (cd "$ROOT" && docker compose up -d --no-build --force-recreate --remove-orphans); then
+      printf 'XMesh Sub: CRITICAL: automatic gateway rollback failed; inspect the original Compose deployment\n' >&2
+    fi
+    if ((SKIP_MANAGER_RESTART == 0)) && [[ -f "$SERVICE_UNIT" ]]; then
+      systemctl restart xmesh-sub-manager.service ||
+        printf 'XMesh Sub: rollback WARN: manager service could not restart\n' >&2
+    fi
+  fi
+  rm -rf -- "$temp"
+  exit "$status"
+}
+trap 'installer_exit "$?"' EXIT
 render_caddyfile >"$temp/Caddyfile"
 render_compose >"$temp/compose.yaml"
 render_limiter >"$temp/limiter.py"
-chmod 600 "$temp/Caddyfile" "$temp/compose.yaml" "$temp/limiter.py"
+  render_limiter_dockerfile >"$temp/Dockerfile.limiter"
+  render_caddy_dockerfile >"$temp/Dockerfile.caddy"
+chmod 600 "$temp/Caddyfile" "$temp/compose.yaml" "$temp/limiter.py" "$temp/Dockerfile.limiter" "$temp/Dockerfile.caddy"
 if command -v python3 >/dev/null; then
   python3 -m py_compile "$temp/limiter.py" || die "Invalid edge limiter"
 fi
@@ -507,15 +593,73 @@ if semver(new)<semver(old):
     raise SystemExit("Refusing release downgrade")
 PY
 
-docker run --rm -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ||
+# Resolve the patched runtime before replacing the running gateway.
+# The build context contains no keys, account records or verified manager code.
+mkdir -p "$temp/image-build"
+cp "$temp/Dockerfile.limiter" "$temp/image-build/Dockerfile"
+limiter_image=$(sub_limiter_image)
+caddy_image=$(sub_caddy_image)
+# A signed source revision owns its image names. Never rebuild an already
+# installed revision under the same tag: a repeat installation should not
+# silently replace the original image ID with a newer Alpine package set.
+if ! docker image inspect "$limiter_image" >/dev/null 2>&1; then
+  docker build --pull -t "$limiter_image" "$temp/image-build" ||
+    die "Could not build patched limiter image; existing deployment unchanged"
+fi
+mkdir -p "$temp/caddy-build"
+cp "$temp/Dockerfile.caddy" "$temp/caddy-build/Dockerfile"
+if ! docker image inspect "$caddy_image" >/dev/null 2>&1; then
+  docker build --pull -t "$caddy_image" "$temp/caddy-build" ||
+    die "Could not build patched Caddy binary; existing deployment unchanged"
+fi
+docker run --rm -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" "$caddy_image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ||
   die "Gateway configuration invalid, existing deployment unchanged"
+# Capture ALL existing configuration before touching live files. In
+# particular, the old manager cannot be relied upon to perform this backup.
+# Old images are preserved by revision-specific tags; verify they still exist.
+if [[ -f "$ROOT/compose.yaml" ]]; then
+  previous_images=$(docker compose -f "$ROOT/compose.yaml" config --images) ||
+    die "Could not inspect old Compose image references; leaving deployment unchanged"
+  [[ -n "$previous_images" ]] ||
+    die "Old Compose has no restorable image references"
+  image_count=0
+  while IFS= read -r old_ref; do
+    [[ -n "$old_ref" && "$old_ref" != *[[:space:]]* ]] ||
+      die "Invalid old image reference; leaving deployment unchanged"
+    docker image inspect "$old_ref" >/dev/null 2>&1 ||
+      die "Old gateway image is missing; refusing unsafe first upgrade"
+    ((image_count+=1))
+    ((image_count<=6)) || die "Unexpected original gateway image inventory"
+  done <<< "$previous_images"
+  mkdir -m 700 "$temp/previous"
+  for name in Caddyfile compose.yaml Dockerfile.limiter Dockerfile.caddy limiter.py manager.py release_verify.py RELEASE_SHA VERSION agent-key.pem manager.json; do
+    if [[ -f "$ROOT/$name" ]]; then
+      cp -p -- "$ROOT/$name" "$temp/previous/$name" ||
+        die "Unable to snapshot old gateway file"
+    else
+      : > "$temp/previous/.absent-$name"
+    fi
+  done
+  if [[ -f "$SERVICE_UNIT" ]]; then
+    cp -p "$SERVICE_UNIT" "$temp/previous/xmesh-sub-manager.service"
+  else
+    : > "$temp/previous/.absent-xmesh-sub-manager.service"
+  fi
+  existing_install=1
+fi
+# From this point onward, failure restores both the old files and the old
+# Docker containers. This also covers upgrades launched by OLD managers.
+install_mutated=1
 [[ ! -f "$ROOT/Caddyfile" ]] || cp -p "$ROOT/Caddyfile" "$ROOT/Caddyfile.previous"
 install -m 600 "$temp/Caddyfile" "$ROOT/Caddyfile"
 install -m 600 "$temp/compose.yaml" "$ROOT/compose.yaml"
+install -m 644 "$temp/Dockerfile.limiter" "$ROOT/Dockerfile.limiter"
+install -m 644 "$temp/Dockerfile.caddy" "$ROOT/Dockerfile.caddy"
 install -m 644 "$temp/limiter.py" "$ROOT/limiter.py"
 cd "$ROOT"
-docker compose pull
-docker compose up -d --remove-orphans
+# Both images were built locally from the verified installer. Do not pull
+# arbitrary remote tags before activating this attested revision.
+docker compose up -d --no-build --remove-orphans
 if [[ -n "$ENROLL_TOKEN" ]]; then
   # Fresh Ed25519 identity is generated on the Sub VPS. Only the public
   # key is sent to Nexus; there is no reusable bearer credential to steal.
@@ -610,7 +754,7 @@ SystemCallArchitectures=native
 [Install]
 WantedBy=multi-user.target
 UNIT
-  install -m 644 "$temp/xmesh-sub-manager.service" /etc/systemd/system/xmesh-sub-manager.service
+  install -m 644 "$temp/xmesh-sub-manager.service" "$SERVICE_UNIT"
   systemctl daemon-reload
   systemctl enable xmesh-sub-manager.service >/dev/null
   if ((SKIP_MANAGER_RESTART == 0)); then
@@ -620,6 +764,6 @@ fi
 install -m 644 "$temp/revision/VERSION" "$ROOT/VERSION"
 info "Started. Check HTTPS health: https://$DOMAIN/healthz"
 info "Status: cd $ROOT && sudo docker compose ps"
-info "Upgrade: cd $ROOT && sudo docker compose pull && sudo docker compose up -d"
+info "Upgrade: use the signed panel update workflow; local limiter images are rebuilt by the attested installer"
 info "Do not move existing users until a canary feed is verified."
 if [[ -n "$ENROLL_TOKEN" ]]; then info "Management agent enrolled. Check its status in Nexus Subscription Studio."; fi

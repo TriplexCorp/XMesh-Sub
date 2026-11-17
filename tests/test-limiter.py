@@ -37,6 +37,20 @@ class LimiterTest(unittest.TestCase):
         with self.assertRaises(OverflowError):
             limit.allow("192.0.2.3",2,now=130)
 
+    def test_ipv6_and_mapped_ipv4_buckets_are_scoped_correctly(self):
+        limiter = edge.BucketLimiter(max_ips=4)
+        self.assertTrue(limiter.allow("2001:db8:a:b::1", 1, now=100))
+        # Native IPv6 shares tokens across /64, even when an attacker rotates
+        # the host bits. Adjacent /64 retains an independent bucket.
+        self.assertFalse(limiter.allow("2001:db8:a:b:ffff::99", 1, now=100))
+        self.assertTrue(limiter.allow("2001:db8:a:c::1", 1, now=100))
+        # IPv4-mapped IPv6 must not grant a second per-IP quota.
+        self.assertTrue(limiter.allow("192.0.2.5", 1, now=100))
+        self.assertFalse(limiter.allow("::ffff:192.0.2.5", 1, now=100))
+        self.assertTrue(limiter.allow("::ffff:192.0.2.6", 1, now=100))
+        with self.assertRaises(OverflowError):
+            limiter.allow("2001:db8:a:d::1", 1, now=100)
+
     def test_worker_exhaustion_closes_connection_instead_of_spawning_threads(self):
         import socketserver
         with tempfile.TemporaryDirectory() as directory:

@@ -202,24 +202,112 @@ class ManagerTest(unittest.TestCase):
         self.assertIn('.github/workflows/attested-release.yml',
                       manager.release_verify.CERT_IDENTITY)
 
-    def test_backup_and_rollback_restore_original_configuration(self):
+    def test_backup_and_rollback_restore_original_configuration_and_images(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "compose.yaml").write_text("services: original")
             (root / "manager.json").write_text("original server settings")
             (root / "agent-key.pem").write_text("original private key")
-            backup = manager.backup_installation(root)
-            (root / "compose.yaml").write_text("services: broken")
-            (root / "manager.json").unlink()
-            (root / "agent-key.pem").write_text("tampered")
-            (root / "VERSION").write_text("9.9.9")
-            with patch.object(manager.subprocess, "run") as run:
+            caddy_id = "sha256:" + "a" * 64
+            limiter_id = "sha256:" + "b" * 64
+            old_images = {
+                "xmesh-sub-caddy:2.11.9-josev4r1": caddy_id,
+                "xmesh-sub-limiter:3.12.16-krb5r1": limiter_id,
+            }
+            images = dict(old_images)
+            def docker_output(argv, _root):
+                if argv[0:4] == ["compose", "-f", str(root / "backups" /
+                        "missing"), "config"]:
+                    raise AssertionError("Unexpected Compose path")
+                if argv[0] == "compose" and argv[-2:] == ["config", "--images"]:
+                    return "\n".join(old_images)
+                if argv[0:3] == ["image", "inspect", "--format"]:
+                    return images[argv[-1]]
+                raise AssertionError(f"Unexpected Docker query: {argv}")
+            def docker_command(argv, **_kwargs):
+                if argv[:3] == ["docker", "image", "tag"]:
+                    images[argv[4]] = images.get(argv[3], argv[3])
+                return subprocess.CompletedProcess(argv, 0)
+            with patch.object(manager, "_docker_output", side_effect=docker_output), \
+                 patch.object(manager.subprocess, "run", side_effect=docker_command) as run:
+                backup = manager.backup_installation(root)
+                saved = json.loads((backup / "images.json").read_text())
+                self.assertEqual(len(saved), 2)
+                self.assertEqual((backup / "images.json").stat().st_mode & 0o777, 0o600)
+                # Model the attested installer overwriting both mutable local tags.
+                for ref in images.keys() & old_images.keys():
+                    images[ref] = "sha256:" + "c" * 64
+                (root / "compose.yaml").write_text("services: broken")
+                (root / "manager.json").unlink()
+                (root / "agent-key.pem").write_text("tampered")
+                (root / "VERSION").write_text("9.9.9")
                 manager.restore_installation(backup, root)
+                for ref, old_id in old_images.items():
+                    self.assertEqual(images[ref], old_id)
+                self.assertEqual((root / "compose.yaml").read_text(), "services: original")
+                self.assertEqual((root / "manager.json").read_text(), "original server settings")
+                self.assertEqual((root / "agent-key.pem").read_text(), "original private key")
+                self.assertFalse((root / "VERSION").exists())
+                self.assertIn("--force-recreate", run.call_args.args[0])
+                self.assertIn("--no-build", run.call_args.args[0])
+
+    def test_rollback_rejects_missing_or_changed_images_before_mutating_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: original")
+            backup = root / "backups" / "pre-update-safe"
+            backup.mkdir(parents=True)
+            (backup / "compose.yaml").write_text("services: original")
+            (backup / "images.json").write_text(json.dumps([{
+                "reference": "xmesh-sub-caddy:2.11.9-josev4r1",
+                "image_id": "sha256:" + "a" * 64,
+                "rescue_tag": "xmesh-sub-rollback-0:pre-update-safe",
+            }]))
+            with patch.object(manager, "_docker_output", return_value="sha256:" + "b" * 64), \
+                 patch.object(manager.subprocess, "run") as docker:
+                with self.assertRaisesRegex(RuntimeError, "missing or changed"):
+                    manager.restore_installation(backup, root)
+                docker.assert_not_called()
             self.assertEqual((root / "compose.yaml").read_text(), "services: original")
-            self.assertEqual((root / "manager.json").read_text(), "original server settings")
-            self.assertEqual((root / "agent-key.pem").read_text(), "original private key")
-            self.assertFalse((root / "VERSION").exists())
-            self.assertEqual(run.call_args.args[0][0:2], ["docker", "compose"])
+            (backup / "images.json").unlink()
+            with self.assertRaisesRegex(RuntimeError, "inventory missing"):
+                manager.restore_installation(backup, root)
+
+    def test_update_health_failure_rolls_back_the_snapshotted_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            version = folder / "VERSION"
+            version.write_text("0.5.0")
+            script = folder / "install.sh"
+            script.write_text("#!/usr/bin/env bash\n")
+            with patch.object(manager.release_verify, "latest_source_sha", return_value="a"*40), \
+                 patch.object(manager.release_verify, "stage_revision",
+                              return_value={"VERSION": version, "install.sh": script}), \
+                 patch.object(manager, "current_version", return_value="0.4.1"), \
+                 patch.object(manager, "backup_installation", return_value=folder / "backup"), \
+                 patch.object(manager, "verify_updated_gateway",
+                              side_effect=RuntimeError("health check failed")), \
+                 patch.object(manager, "restore_installation") as restore, \
+                 patch.object(manager.subprocess, "run") as run:
+                with self.assertRaisesRegex(RuntimeError, "health check failed"):
+                    manager.perform_update(self.config)
+                restore.assert_called_once_with(folder / "backup")
+                self.assertEqual(run.call_count, 2)
+                self.assertIn("--skip-manager-restart", run.call_args.args[0])
+
+    def test_updated_gateway_requires_real_https_health_after_both_services_run(self):
+        with patch.object(manager, "_docker_output",
+                          return_value="xmesh-sub-limiter\nxmesh-sub"), \
+             patch.object(manager, "verified_open") as request:
+            response = request.return_value.__enter__.return_value
+            response.status = 200
+            response.read.return_value = b"ok"
+            manager.verify_updated_gateway(self.config, root=Path("/tmp/test-sub-only"))
+            self.assertEqual(request.call_args.args[0].full_url,
+                             "https://" + self.config["domain"] + "/healthz")
+        with patch.object(manager, "_docker_output", return_value="xmesh-sub"):
+            with self.assertRaisesRegex(RuntimeError, "containers are not running"):
+                manager.verify_updated_gateway(self.config, root=Path("/tmp/test-sub-only"))
 
     def test_update_rejects_unattested_revision_before_execution(self):
         with patch.object(manager.release_verify,'latest_source_sha',return_value='a'*40), \

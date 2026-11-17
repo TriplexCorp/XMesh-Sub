@@ -14,21 +14,21 @@ jobs:
           persist-credentials: false
       - name: Syntax and ShellCheck
         run: |
-          bash -n install.sh bootstrap.sh tests/test-install.sh tests/test-bootstrap.sh
-          shellcheck -s bash install.sh bootstrap.sh tests/test-install.sh tests/test-bootstrap.sh
+          bash -n install.sh bootstrap.sh tests/test-install.sh tests/test-bootstrap.sh tests/test-runtime-edge.sh
+          shellcheck -s bash install.sh bootstrap.sh tests/test-install.sh tests/test-bootstrap.sh tests/test-runtime-edge.sh
       - name: Installer argument tests
         run: |
           bash tests/test-install.sh
           bash tests/test-bootstrap.sh
       - name: Outbound signed agent and edge IP limiter tests
         run: |
-          python3 -m py_compile manager.py limiter.py
+          python3 -m py_compile manager.py limiter.py tests/test-image-rollback.py tests/test-first-upgrade-rollback.py
           python3 tests/test-manager.py
           python3 tests/test-limiter.py
       - name: Validate rendered Caddy configuration
         run: |
           bash install.sh --panel https://panel.example.org --domain sub.example.org --path /s --dry-run | sed -n '/^# Caddyfile$/,/^# compose.yaml$/p' | sed '1d;$d' > Caddyfile
-          docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.11.9-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - name: Verify keyless release security policy and negative cases
         run: |
           python3 -m py_compile release_verify.py

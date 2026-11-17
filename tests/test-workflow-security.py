@@ -9,7 +9,10 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def unpinned_actions(text):
     uses = re.findall(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)", text, re.MULTILINE)
-    return [value for value in uses if not re.fullmatch(
+    # This one local reusable workflow is protected by the same reviewed
+    # commit as the publisher; arbitrary local includes are not allowed.
+    reviewed_local = {"./.github/workflows/image-security.yml"}
+    return [value for value in uses if value not in reviewed_local and not re.fullmatch(
         r"[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}", value
     )]
 
@@ -23,6 +26,27 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertEqual(unpinned_actions(
             "- uses: actions/attest@" + "a" * 40 + " # reviewed v4\n"
         ), [])
+
+    def test_only_reviewed_local_reusable_gate_is_allowed(self):
+        self.assertEqual(unpinned_actions(
+            "    uses: ./.github/workflows/image-security.yml\n"
+        ), [])
+        self.assertTrue(unpinned_actions("    uses: ./.github/workflows/unsafe.yml\n"))
+
+    def test_attester_cannot_publish_before_two_architecture_security_gates(self):
+        publisher = (ROOT / ".github/workflows/attested-release.yml").read_text()
+        gate = (ROOT / ".github/workflows/image-security.yml").read_text()
+        self.assertIn("uses: ./.github/workflows/image-security.yml", publisher)
+        self.assertRegex(publisher, r"(?m)^  publish:\n    needs: runtime-image-security\n")
+        self.assertRegex(gate, r"(?m)^  workflow_call:$")
+        self.assertIn("arch: amd64", gate)
+        self.assertIn("arch: arm64", gate)
+        self.assertIn("fail-fast: false", gate)
+        self.assertIn("Fail closed on unresolved High and Critical vulnerabilities", gate)
+        self.assertIn('raise SystemExit(f"{count} High/Critical issues remain in Sub runtime images")', gate)
+        self.assertNotIn("continue-on-error: true", gate)
+        self.assertNotIn("|| true", gate)
+        self.assertNotIn("secrets: inherit", publisher)
 
     def test_all_checked_in_actions_are_pinned(self):
         workflows = list((ROOT / ".github/workflows").glob("*.yml"))

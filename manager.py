@@ -79,25 +79,83 @@ def version_tuple(version: str) -> tuple[int, int, int]:
     return tuple(map(int, match.groups())) if match else (0, 0, 0)
 
 
+BACKUP_FILES = ("Caddyfile", "compose.yaml", "manager.py", "manager.json", "agent-key.pem",
+                "limiter.py", "release_verify.py", "RELEASE_SHA", "VERSION",
+                "Dockerfile.limiter", "Dockerfile.caddy")
+DOCKER_IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _docker_output(argv: list[str], root: Path) -> str:
+    result = subprocess.run(["docker", *argv], cwd=root, check=True, timeout=30,
+                            capture_output=True, text=True)
+    return result.stdout.strip()
+
+
 def backup_installation(root: Path = ROOT) -> Path:
+    """Preserve files AND exact local image IDs before an installer overwrites tags."""
     destination = root / "backups"
     destination.mkdir(mode=0o700, exist_ok=True)
     backup = Path(tempfile.mkdtemp(prefix="pre-update-", dir=str(destination)))
     backup.chmod(0o700)
-    files = ("Caddyfile", "compose.yaml", "manager.py", "manager.json", "agent-key.pem", "limiter.py",
-             "release_verify.py", "RELEASE_SHA", "VERSION")
-    for name in files:
+    for name in BACKUP_FILES:
         old = root / name
         if old.is_file():
             shutil.copy2(old, backup / name)
         else:
             (backup / (".absent-" + name)).touch()
+
+    # The installer uses fixed local image tags that Docker reassigns during
+    # docker build. Saving only compose.yaml cannot recover their old content.
+    # Ask the *old* compose config for the exact image names before upgrading.
+    compose = backup / "compose.yaml"
+    if not compose.is_file():
+        raise RuntimeError("Cannot update gateway without existing Compose configuration")
+    output = _docker_output(["compose", "-f", str(compose), "config", "--images"], root)
+    refs = sorted(set(output.splitlines()))
+    if not 1 <= len(refs) <= 4 or any(
+            not ref or len(ref) > 255 or any(ch.isspace() for ch in ref) or "@" in ref
+            for ref in refs):
+        raise RuntimeError("Unrecognized original gateway image references")
+    snapshots = []
+    for index, ref in enumerate(refs):
+        image_id = _docker_output(["image", "inspect", "--format", "{{.Id}}", ref], root)
+        if not DOCKER_IMAGE_ID.fullmatch(image_id):
+            raise RuntimeError("Could not identify original gateway image")
+        rescue_tag = f"xmesh-sub-rollback-{index}:{backup.name}"
+        subprocess.run(["docker", "image", "tag", image_id, rescue_tag], cwd=root,
+                       check=True, timeout=30)
+        snapshots.append({"reference": ref, "image_id": image_id, "rescue_tag": rescue_tag})
+    image_manifest = backup / "images.json"
+    image_manifest.write_text(json.dumps(snapshots, separators=(",", ":")), encoding="utf-8")
+    image_manifest.chmod(0o600)
     return backup
 
 
 def restore_installation(backup: Path, root: Path = ROOT) -> None:
-    for name in ("Caddyfile", "compose.yaml", "manager.py", "manager.json", "agent-key.pem", "limiter.py",
-                 "release_verify.py", "RELEASE_SHA", "VERSION"):
+    """Restore old image IDs before force-recreating containers from old files."""
+    image_manifest = backup / "images.json"
+    if not image_manifest.is_file():
+        raise RuntimeError("Rollback image inventory missing; refusing partial restore")
+    snapshots = json.loads(image_manifest.read_text(encoding="utf-8"))
+    if not isinstance(snapshots, list) or not 1 <= len(snapshots) <= 4:
+        raise RuntimeError("Invalid rollback image inventory")
+    # Validate every retained image before mutating any deployed tag or file.
+    for entry in snapshots:
+        if (not isinstance(entry, dict) or set(entry) != {"reference", "image_id", "rescue_tag"}
+                or not isinstance(entry["reference"], str)
+                or not isinstance(entry["rescue_tag"], str)
+                or not isinstance(entry["image_id"], str)
+                or not DOCKER_IMAGE_ID.fullmatch(entry["image_id"])
+                or not entry["rescue_tag"].startswith("xmesh-sub-rollback-")
+                or not entry["reference"] or any(ch.isspace() for ch in entry["reference"])):
+            raise RuntimeError("Invalid rollback image entry")
+        if _docker_output(["image", "inspect", "--format", "{{.Id}}",
+                           entry["rescue_tag"]], root) != entry["image_id"]:
+            raise RuntimeError("Retained rollback image is missing or changed")
+    for entry in snapshots:
+        subprocess.run(["docker", "image", "tag", entry["rescue_tag"],
+                        entry["reference"]], cwd=root, check=True, timeout=30)
+    for name in BACKUP_FILES:
         saved = backup / name
         target = root / name
         if saved.is_file():
@@ -105,7 +163,31 @@ def restore_installation(backup: Path, root: Path = ROOT) -> None:
         elif (backup / (".absent-" + name)).is_file():
             target.unlink(missing_ok=True)
     subprocess.run(["docker", "compose", "-f", str(root / "compose.yaml"),
-                    "up", "-d", "--remove-orphans"], cwd=root, check=True, timeout=180)
+                    "up", "-d", "--no-build", "--force-recreate", "--remove-orphans"],
+                   cwd=root, check=True, timeout=180)
+
+
+def verify_updated_gateway(config: dict, root: Path = ROOT) -> None:
+    """Check the real public HTTPS endpoint before reporting update success."""
+    running = _docker_output(["compose", "-f", str(root / "compose.yaml"),
+                              "ps", "--services", "--status", "running"], root).splitlines()
+    if not {"xmesh-sub", "xmesh-sub-limiter"}.issubset(set(running)):
+        raise RuntimeError("Updated gateway containers are not running")
+    # A previous HTTPS certificate and DNS are expected on an existing gateway.
+    # Verify actual external routing and certificate trust, not just container state.
+    url = "https://" + config["domain"] + "/healthz"
+    error = None
+    for attempt in range(6):
+        try:
+            with verified_open(urllib.request.Request(url, method="GET"), timeout=12) as response:
+                if response.status == 200 and response.read(3) == b"ok":
+                    return
+                error = RuntimeError("Subscription gateway health response is invalid")
+        except (OSError, ValueError, urllib.error.URLError) as exc:
+            error = exc
+        if attempt < 5:
+            time.sleep(5)
+    raise RuntimeError("Updated subscription gateway failed verified HTTPS health check") from error
 
 
 def signed_agent_headers(route: str, payload: bytes, key: Path = PRIVATE_KEY_FILE) -> dict:
@@ -218,6 +300,7 @@ def perform_update(config: dict) -> None:
                 "--domain", config["domain"], "--path", config["path"],
                 "--release-sha", sha, "--skip-manager-restart",
             ], check=True, timeout=900, stdout=subprocess.DEVNULL)
+            verify_updated_gateway(config)
         except Exception as original:
             try:
                 restore_installation(backup)
