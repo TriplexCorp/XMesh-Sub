@@ -11,6 +11,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+import time
 import uuid
 
 HERE = Path(__file__).resolve().parent.parent
@@ -33,21 +34,79 @@ def image_for(root, service):
     return docker("inspect", "--format", "{{.Image}}", cid)
 
 
-def compose_image(caddy, limiter):
-    # Two running process containers, but no real public listening ports.
+def compose_image(caddy, limiter, *, https_gateway=False):
+    # Only loopback's random host port is exposed to CI. The legacy gateway
+    # serves real TLS using Caddy's *local* CA, never public ACME/DNS.
+    gateway = (
+        "    entrypoint: ['caddy', 'run', '--config', '/etc/caddy/Caddyfile', '--adapter', 'caddyfile']\n"
+        "    command: []\n"
+        "    ports:\n"
+        "      - '127.0.0.1::8443'\n"
+        "    volumes:\n"
+        "      - ./Caddyfile:/etc/caddy/Caddyfile:ro\n"
+        "      - ./caddy-data:/data\n"
+        "      - ./caddy-config:/config\n"
+    ) if https_gateway else (
+        "    entrypoint: ['sh', '-c', 'sleep 300']\n"
+        "    command: []\n"
+    )
     return (
         f"services:\n"
         f"  xmesh-sub:\n"
         f"    image: {caddy}\n"
         f"    pull_policy: never\n"
-        f"    entrypoint: ['sh', '-c', 'sleep 300']\n"
-        f"    command: []\n"
+        + gateway +
         f"  xmesh-sub-limiter:\n"
         f"    image: {limiter}\n"
         f"    pull_policy: never\n"
         f"    entrypoint: ['sh', '-c', 'sleep 300']\n"
         f"    command: []\n"
     )
+
+
+LEGACY_CADDYFILE = """https://localhost:8443 {
+    tls internal
+    handle /healthz {
+        respond "ok" 200
+    }
+    handle /s/* {
+        respond "legacy-subscriber" 200
+    }
+    handle /portal/* {
+        respond "legacy-portal" 200
+    }
+    handle {
+        respond "Not Found" 404
+    }
+}
+"""
+
+
+def assert_legacy_https(root):
+    """Check real TLS on loopback before and after forced recreation/rollback."""
+    cid = docker("compose", "-f", str(root / "compose.yaml"), "ps", "-q", "xmesh-sub")
+    binding = docker("port", cid, "8443/tcp").splitlines()
+    if len(binding) != 1 or not re.fullmatch(r"127\.0\.0\.1:[0-9]+", binding[0]):
+        raise AssertionError(f"TLS gateway escaped loopback: {binding!r}")
+    host_port = binding[0].split(":")[-1]
+    for suffix, expected in (("/healthz", "ok"), ("/s/" + "a" * 64, "legacy-subscriber"),
+                             ("/portal/" + "b" * 64, "legacy-portal")):
+        command = [
+            "curl", "--noproxy", "*", "--insecure", "--fail", "--silent",
+            "--show-error", "--max-time", "2", "--connect-to",
+            f"localhost:8443:127.0.0.1:{host_port}",
+            "https://localhost:8443" + suffix,
+        ]
+        for attempt in range(60):
+            result = subprocess.run(command, capture_output=True, text=True, timeout=4)
+            if result.returncode == 0 and result.stdout.strip() == expected:
+                break
+            time.sleep(0.25)
+        else:
+            raise AssertionError(
+                f"Legacy HTTPS {suffix} was not restored: rc={result.returncode}, "
+                f"body={result.stdout!r}, stderr={result.stderr[-1000:]!r}"
+            )
 
 
 def main():
@@ -89,7 +148,9 @@ def main():
             # An old manager that overwrites old tags cannot safely recover.
             docker("image", "tag", OLD_LIMITER, new_caddy)
             docker("image", "tag", OLD_CADDY, new_limiter)
-            (root / "compose.yaml").write_text(compose_image(old_caddy, old_limiter))
+            (root / "Caddyfile").write_text(LEGACY_CADDYFILE)
+            (root / "compose.yaml").write_text(
+                compose_image(old_caddy, old_limiter, https_gateway=True))
             (root / "VERSION").write_text("0.1.0\n")
             (root / "manager.json").write_text('{"dummy":"secret"}\n')
             (root / "manager.json").chmod(0o600)
@@ -97,6 +158,7 @@ def main():
             docker("compose", "-f", str(root / "compose.yaml"), "up", "-d", "--no-build")
             for name, old_id in expected.items():
                 assert image_for(root, name) == old_id
+            assert_legacy_https(root)
 
             mutated_compose = root / "new-compose.fixture"
             mutated_compose.write_text(compose_image(new_caddy, new_limiter))
@@ -114,6 +176,7 @@ def main():
                 "install_mutated=1\n"
                 "trap 'installer_exit \"$?\"' EXIT\n"
                 "printf 'BROKEN\\n' > \"$ROOT/VERSION\"\n"
+                "printf 'BROKEN\\n' > \"$ROOT/Caddyfile\"\n"
                 "printf 'BROKEN\\n' > \"$ROOT/manager.json\"\n"
                 "printf 'BROKEN\\n' > \"$SERVICE_UNIT\"\n"
                 f"cp {shlex.quote(str(mutated_compose))} \"$ROOT/compose.yaml\"\n"
@@ -131,16 +194,19 @@ def main():
             assert (root / "manager.json").read_text() == '{"dummy":"secret"}\n'
             assert (root / "manager.json").stat().st_mode & 0o777 == 0o600
             assert service.read_text() == "original systemd unit\n"
-            assert (root / "compose.yaml").read_text() == compose_image(old_caddy, old_limiter)
+            assert (root / "Caddyfile").read_text() == LEGACY_CADDYFILE
+            assert (root / "compose.yaml").read_text() == compose_image(
+                old_caddy, old_limiter, https_gateway=True)
             for name, old_id in expected.items():
                 assert image_for(root, name) == old_id, (name, old_id)
+            assert_legacy_https(root)
             assert not temp.exists(), "Private rollback staging directory not cleaned"
             # Installing another SHA must never change the identity of a
             # previous revision's Docker tag.
             assert docker("image", "inspect", "--format", "{{.Id}}", old_caddy) == expected["xmesh-sub"]
             assert docker("image", "inspect", "--format", "{{.Id}}", old_limiter) == expected["xmesh-sub-limiter"]
-            print("PASS: real old-manager first-upgrade rollback restores files, "
-                  "manager settings and both original running Docker images")
+            print("PASS: legacy first-upgrade rollback restores real HTTPS subscriber "
+                  "and portal endpoints, private files and both old Docker image IDs")
         finally:
             if (root / "compose.yaml").exists():
                 subprocess.run(["docker", "compose", "-f", str(root / "compose.yaml"),
