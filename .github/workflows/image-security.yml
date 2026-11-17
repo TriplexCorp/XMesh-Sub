@@ -43,7 +43,7 @@ jobs:
           import os, pathlib, re
           compose=pathlib.Path(os.environ["RUNNER_TEMP"],"compose.yaml").read_text()
           refs=re.findall(r"^\s+image:\s+(\S+)\s*$",compose,re.M)
-          allowed=("xmesh-sub-limiter:3.12.16-krb5r1","xmesh-sub-caddy:2.11.9-josev4r1")
+          allowed=("xmesh-sub-limiter:rev-0000000000000000000000000000000000000000","xmesh-sub-caddy:rev-0000000000000000000000000000000000000000")
           if len(refs)!=2 or set(refs)!=set(allowed):
               raise SystemExit(f"Unexpected installer runtime images: {refs}")
           pathlib.Path(os.environ["RUNNER_TEMP"],"image-refs.txt").write_text("\n".join(refs)+"\n")
@@ -66,19 +66,19 @@ jobs:
           mkdir -p "$RUNNER_TEMP/limiter-build" "$RUNNER_TEMP/caddy-build"
           cp "$RUNNER_TEMP/Dockerfile.limiter" "$RUNNER_TEMP/limiter-build/Dockerfile"
           cp "$RUNNER_TEMP/Dockerfile.caddy" "$RUNNER_TEMP/caddy-build/Dockerfile"
-          docker build --pull --platform linux/${{ matrix.arch }} --tag xmesh-sub-limiter:3.12.16-krb5r1 "$RUNNER_TEMP/limiter-build"
-          docker build --pull --platform linux/${{ matrix.arch }} --tag xmesh-sub-caddy:2.11.9-josev4r1 "$RUNNER_TEMP/caddy-build"
+          docker build --pull --platform linux/${{ matrix.arch }} --tag xmesh-sub-limiter:rev-0000000000000000000000000000000000000000 "$RUNNER_TEMP/limiter-build"
+          docker build --pull --platform linux/${{ matrix.arch }} --tag xmesh-sub-caddy:rev-0000000000000000000000000000000000000000 "$RUNNER_TEMP/caddy-build"
           {
             docker image inspect --format '{{index .RepoDigests 0}}' caddy:2.11.9-alpine
             docker image inspect --format '{{index .RepoDigests 0}}' python:3.12.16-alpine3.24
-            docker image inspect --format '{{.Id}}' xmesh-sub-limiter:3.12.16-krb5r1
-            docker image inspect --format '{{.Id}}' xmesh-sub-caddy:2.11.9-josev4r1
+            docker image inspect --format '{{.Id}}' xmesh-sub-limiter:rev-0000000000000000000000000000000000000000
+            docker image inspect --format '{{.Id}}' xmesh-sub-caddy:rev-0000000000000000000000000000000000000000
           } | tee "$RUNNER_TEMP/image-digests.txt"
-          docker run --rm -v "$RUNNER_TEMP/sub-dry-run:/tmp/ignore:ro" xmesh-sub-caddy:2.11.9-josev4r1 caddy version
+          docker run --rm -v "$RUNNER_TEMP/sub-dry-run:/tmp/ignore:ro" xmesh-sub-caddy:rev-0000000000000000000000000000000000000000 caddy version
           sed -n '/^# Caddyfile$/,/^# compose.yaml$/p' "$RUNNER_TEMP/sub-dry-run" | sed '1d;$d' > "$RUNNER_TEMP/Caddyfile"
           test -s "$RUNNER_TEMP/Caddyfile"
-          docker run --rm -v "$RUNNER_TEMP/Caddyfile:/etc/caddy/Caddyfile:ro" xmesh-sub-caddy:2.11.9-josev4r1 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-          docker run --rm xmesh-sub-caddy:2.11.9-josev4r1 caddy build-info > "$RUNNER_TEMP/caddy-build-info.txt"
+          docker run --rm -v "$RUNNER_TEMP/Caddyfile:/etc/caddy/Caddyfile:ro" xmesh-sub-caddy:rev-0000000000000000000000000000000000000000 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          docker run --rm xmesh-sub-caddy:rev-0000000000000000000000000000000000000000 caddy build-info > "$RUNNER_TEMP/caddy-build-info.txt"
           if grep -Fq 'github.com/go-jose/go-jose/v3' "$RUNNER_TEMP/caddy-build-info.txt"; then
             echo 'Unexpected vulnerable JOSE-v3 dependency in final Caddy build' >&2
             exit 1
@@ -86,10 +86,14 @@ jobs:
           grep -Fq 'github.com/go-jose/go-jose/v4' "$RUNNER_TEMP/caddy-build-info.txt" || { echo 'Expected patched JOSE-v4 missing' >&2; exit 1; }
       - name: Exercise real Caddy and Unix limiter against spoofed client headers
         shell: bash
-        run: bash tests/test-runtime-edge.sh "$RUNNER_TEMP"
+        run: |
+          XMESH_SUB_CADDY_IMAGE=xmesh-sub-caddy:rev-0000000000000000000000000000000000000000 XMESH_SUB_LIMITER_IMAGE=xmesh-sub-limiter:rev-0000000000000000000000000000000000000000 \
+            bash tests/test-runtime-edge.sh "$RUNNER_TEMP"
       - name: Recover exact old Docker image IDs after simulated broken upgrade
         shell: bash
-        run: python3 tests/test-image-rollback.py
+        run: |
+          XMESH_SUB_CADDY_IMAGE=xmesh-sub-caddy:rev-0000000000000000000000000000000000000000 XMESH_SUB_LIMITER_IMAGE=xmesh-sub-limiter:rev-0000000000000000000000000000000000000000 \
+            python3 tests/test-image-rollback.py
       - name: Install pinned and checksum-verified Trivy v0.76.2
         env:
           TRIVY_ARCH: ${{ matrix.arch }}
@@ -130,9 +134,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           "$RUNNER_TEMP/trivy" image --scanners vuln --format json \
-            --output "$RUNNER_TEMP/caddy-vulnerabilities.json" --no-progress xmesh-sub-caddy:2.11.9-josev4r1
+            --output "$RUNNER_TEMP/caddy-vulnerabilities.json" --no-progress xmesh-sub-caddy:rev-0000000000000000000000000000000000000000
           "$RUNNER_TEMP/trivy" image --scanners vuln --format json \
-            --output "$RUNNER_TEMP/limiter-vulnerabilities.json" --no-progress xmesh-sub-limiter:3.12.16-krb5r1
+            --output "$RUNNER_TEMP/limiter-vulnerabilities.json" --no-progress xmesh-sub-limiter:rev-0000000000000000000000000000000000000000
       - name: Preserve evidence including any unresolved advisories
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
