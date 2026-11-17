@@ -6,6 +6,7 @@ on:
       - 'tests/test-install.sh'
       - 'tests/test-runtime-edge.sh'
       - 'tests/test-image-rollback.py'
+      - 'tests/test-first-upgrade-rollback.py'
       - '.github/workflows/image-security.yml'
       - '.github/workflows/ci.yml'
       - '.github/workflows/attested-release.yml'
@@ -94,6 +95,11 @@ jobs:
         run: |
           XMESH_SUB_CADDY_IMAGE=xmesh-sub-caddy:rev-0000000000000000000000000000000000000000 XMESH_SUB_LIMITER_IMAGE=xmesh-sub-limiter:rev-0000000000000000000000000000000000000000 \
             python3 tests/test-image-rollback.py
+      - name: Prove first-ever upgrade rollback with legacy manager and real containers
+        shell: bash
+        run: |
+          XMESH_SUB_CADDY_IMAGE=xmesh-sub-caddy:rev-0000000000000000000000000000000000000000 XMESH_SUB_LIMITER_IMAGE=xmesh-sub-limiter:rev-0000000000000000000000000000000000000000 \
+            python3 tests/test-first-upgrade-rollback.py
       - name: Install pinned and checksum-verified Trivy v0.76.2
         env:
           TRIVY_ARCH: ${{ matrix.arch }}
