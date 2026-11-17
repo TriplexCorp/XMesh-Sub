@@ -104,4 +104,9 @@ route="$base/s/$token"
   { echo 'Client spoofed XFF to bypass direct-peer rate limit' >&2; exit 1; }
 [[ $(status -H 'X-XMesh-Peer-IP: 198.51.100.55' "$route") == 429 ]] ||
   { echo 'Client spoofed internal peer-IP header to bypass rate limit' >&2; exit 1; }
-echo 'Verified: Caddy routes, private Unix gate and spoof-resistant per-peer HTTP 429'
+# An IPv6-valued forged header must not reset a direct IPv4 peer's bucket.
+[[ $(status -H 'X-Forwarded-For: 2001:db8:beef::100' "$route") == 429 ]] ||
+  { echo 'Client spoofed IPv6 XFF to bypass direct-peer rate limit' >&2; exit 1; }
+[[ $(status -H 'X-XMesh-Peer-IP: 2001:db8:beef::200' "$route") == 429 ]] ||
+  { echo 'Client spoofed IPv6 internal peer header to bypass rate limit' >&2; exit 1; }
+echo 'Verified: Caddy routes, private Unix gate and IPv4/IPv6 spoof-resistant per-peer HTTP 429'
