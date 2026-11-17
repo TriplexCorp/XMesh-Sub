@@ -15,7 +15,7 @@ import uuid
 
 HERE = Path(__file__).resolve().parent.parent
 INSTALL = (HERE / "install.sh").read_text()
-SNAP_START = "# Capture ALL existing configuration before touching live files."
+SNAP_START = "# Old images are preserved by revision-specific tags; verify they still exist.\n"
 SNAP_END = "# From this point onward, failure restores both the old files"
 OLD_CADDY = os.environ.get("XMESH_SUB_CADDY_IMAGE", "xmesh-sub-caddy:2.11.9-josev4r1")
 OLD_LIMITER = os.environ.get("XMESH_SUB_LIMITER_IMAGE", "xmesh-sub-limiter:3.12.16-krb5r1")
