@@ -83,11 +83,17 @@ jobs:
               --deny-self-hosted-runners
           done
 
-      - name: Prove anonymous clean-VPS verification works (no token/login)
-        # This tests the PUBLIC API + Sigstore bundle fallback used on a VPS.
-        # The workflow token is deliberately not exposed to this subprocess.
+      - name: Verify signed release in isolated CLI without anonymous API IP exhaustion
+        # GitHub-hosted runners share the unauthenticated REST rate limit by
+        # egress IP (60/hour). Only GET /attestations/sha256:... receives this
+        # short-lived Actions token; downloaded artifacts and bundles remain
+        # UNTRUSTED until the same offline signature, certificate identity,
+        # main ref and exact SHA checks all pass.
+        # This is NOT an anonymous-network clean-VPS acceptance test. That
+        # separate deployment gate remains required before a production rollout.
         env:
-          GH_CONFIG_DIR: ${{ runner.temp }}/isolated-anonymous-gh
+          GH_CONFIG_DIR: ${{ runner.temp }}/isolated-release-gh
+          XMESH_ATTESTATION_INDEX_TOKEN: ${{ github.token }}
         run: |
           unset GH_TOKEN GITHUB_TOKEN
           python3 - <<'PY'
@@ -95,7 +101,9 @@ jobs:
           from pathlib import Path
           import release_verify
           with tempfile.TemporaryDirectory() as temp:
-              files=release_verify.stage_revision(os.environ['GITHUB_SHA'],Path(temp))
+              files=release_verify.stage_revision(
+                  os.environ['GITHUB_SHA'], Path(temp),
+                  attestations_read_token=os.environ['XMESH_ATTESTATION_INDEX_TOKEN'])
               assert set(files)==set(release_verify.FILES)
-              print('Clean VPS verified all four public release files with no Github login')
+              print('Verified exact signed release: isolated CLI, offline OIDC proof, scoped API reads')
           PY
