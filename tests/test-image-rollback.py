@@ -25,7 +25,9 @@ def docker(*args):
 def container_image(compose: Path, service: str) -> str:
     cid = docker("compose", "-f", str(compose), "ps", "-q", service)
     if not cid:
-        raise RuntimeError(f"{service} did not start")
+        containers = docker("compose", "-f", str(compose), "ps", "-a")
+        logs = docker("compose", "-f", str(compose), "logs", "--tail", "25")
+        raise RuntimeError(f"{service} did not start; status={containers!r}; logs={logs!r}")
     return docker("inspect", "--format", "{{.Image}}", cid)
 
 
@@ -52,13 +54,13 @@ def main():
                 f"  xmesh-sub:\n"
                 f"    image: {original_caddy}\n"
                 f"    pull_policy: never\n"
-                f"    entrypoint: ['sh', '-c']\n"
-                f"    command: 'sleep 300'\n"
+                f"    entrypoint: ['sh', '-c', 'sleep 300']\n"
+                f"    command: []\n"
                 f"  xmesh-sub-limiter:\n"
                 f"    image: {original_limiter}\n"
                 f"    pull_policy: never\n"
-                f"    entrypoint: ['sh', '-c']\n"
-                f"    command: 'sleep 300'\n", encoding="utf-8")
+                f"    entrypoint: ['sh', '-c', 'sleep 300']\n"
+                f"    command: []\n", encoding="utf-8")
             docker("compose", "-f", str(compose), "up", "-d", "--no-build")
             assert container_image(compose, "xmesh-sub") == caddy_image
             assert container_image(compose, "xmesh-sub-limiter") == limiter_image
