@@ -458,6 +458,7 @@ if [[ ! -e "$ROOT/edge-policy/config.json" ]]; then
   chmod 644 "$ROOT/edge-policy/config.json"
 fi
 temp=$(mktemp -d "$ROOT/.install.XXXXXXXX")
+SERVICE_UNIT=/etc/systemd/system/xmesh-sub-manager.service
 existing_install=0
 install_mutated=0
 # The first updater may be a PRE-remediation manager, which does not know how
@@ -479,15 +480,15 @@ installer_exit() {
       fi
     done
     if [[ -f "$temp/previous/xmesh-sub-manager.service" ]]; then
-      cp -p -- "$temp/previous/xmesh-sub-manager.service" /etc/systemd/system/xmesh-sub-manager.service
+      cp -p -- "$temp/previous/xmesh-sub-manager.service" $SERVICE_UNIT
     elif [[ -f "$temp/previous/.absent-xmesh-sub-manager.service" ]]; then
-      rm -f /etc/systemd/system/xmesh-sub-manager.service
+      rm -f $SERVICE_UNIT
     fi
     systemctl daemon-reload
     if ! (cd "$ROOT" && docker compose up -d --no-build --force-recreate --remove-orphans); then
       printf 'XMesh Sub: CRITICAL: automatic gateway rollback failed; inspect the original Compose deployment\n' >&2
     fi
-    if ((SKIP_MANAGER_RESTART == 0)) && [[ -f /etc/systemd/system/xmesh-sub-manager.service ]]; then
+    if ((SKIP_MANAGER_RESTART == 0)) && [[ -f $SERVICE_UNIT ]]; then
       systemctl restart xmesh-sub-manager.service ||
         printf 'XMesh Sub: rollback WARN: manager service could not restart\n' >&2
     fi
@@ -639,8 +640,8 @@ if [[ -f "$ROOT/compose.yaml" ]]; then
       : > "$temp/previous/.absent-$name"
     fi
   done
-  if [[ -f /etc/systemd/system/xmesh-sub-manager.service ]]; then
-    cp -p /etc/systemd/system/xmesh-sub-manager.service "$temp/previous/xmesh-sub-manager.service"
+  if [[ -f $SERVICE_UNIT ]]; then
+    cp -p $SERVICE_UNIT "$temp/previous/xmesh-sub-manager.service"
   else
     : > "$temp/previous/.absent-xmesh-sub-manager.service"
   fi
@@ -753,7 +754,7 @@ SystemCallArchitectures=native
 [Install]
 WantedBy=multi-user.target
 UNIT
-  install -m 644 "$temp/xmesh-sub-manager.service" /etc/systemd/system/xmesh-sub-manager.service
+  install -m 644 "$temp/xmesh-sub-manager.service" $SERVICE_UNIT
   systemctl daemon-reload
   systemctl enable xmesh-sub-manager.service >/dev/null
   if ((SKIP_MANAGER_RESTART == 0)); then
