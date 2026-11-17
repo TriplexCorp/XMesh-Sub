@@ -32,17 +32,29 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def fetch_bytes(url: str, limit: int) -> bytes:
+def fetch_bytes(url: str, limit: int, *, attestations_read_token: str | None = None) -> bytes:
     if not url.startswith(("https://api.github.com/", "https://raw.githubusercontent.com/")):
         raise ValueError("Untrusted source host")
     opener = urllib.request.build_opener(
         urllib.request.HTTPSHandler(context=ssl.create_default_context()),
         NoRedirect(),
     )
-    with opener.open(urllib.request.Request(url, headers={
-            "User-Agent": "XMesh-Sub-Release-Verifier/1",
-            "Accept": "application/vnd.github+json",
-    }), timeout=25) as reply:
+    headers = {
+        "User-Agent": "XMesh-Sub-Release-Verifier/1",
+        "Accept": "application/vnd.github+json",
+    }
+    # GitHub Actions shares its unauthenticated 60/hour IP quota with other
+    # runners. Its short-lived token can fetch the *public attestation index*
+    # without granting the attestation any trust. This is never used for raw
+    # source downloads and never passed to the offline signature verifier.
+    index_prefix = f"https://api.github.com/repos/{REPO}/attestations/sha256:"
+    if attestations_read_token is not None:
+        if not url.startswith(index_prefix) or not attestations_read_token.isascii() or not (
+                1 <= len(attestations_read_token) <= 1024
+        ) or any(not (ch.isalnum() or ch in "-_.") for ch in attestations_read_token):
+            raise ValueError("Invalid attestation index read credential or endpoint")
+        headers["Authorization"] = "Bearer " + attestations_read_token
+    with opener.open(urllib.request.Request(url, headers=headers), timeout=25) as reply:
         data = reply.read(limit + 1)
     if len(data) > limit:
         raise ValueError("Oversized release response")
@@ -68,7 +80,7 @@ def latest_source_sha() -> str:
     return sha
 
 
-def public_bundles(file: Path) -> list[dict]:
+def public_bundles(file: Path, *, attestations_read_token: str | None = None) -> list[dict]:
     """Fetch public Sigstore bundles without a GitHub login or access token.
 
     The API response and bundle URLs are untrusted. The actual signature,
@@ -76,7 +88,8 @@ def public_bundles(file: Path) -> list[dict]:
     """
     digest = hashlib.sha256(file.read_bytes()).hexdigest()
     index = json.loads(fetch_bytes(
-        f"https://api.github.com/repos/{REPO}/attestations/sha256:{digest}", 256 * 1024))
+        f"https://api.github.com/repos/{REPO}/attestations/sha256:{digest}", 256 * 1024,
+        attestations_read_token=attestations_read_token))
     entries = index.get("attestations") if isinstance(index, dict) else None
     if not isinstance(entries, list) or not 1 <= len(entries) <= 30:
         raise ValueError("No public attestation bundles")
@@ -112,11 +125,11 @@ def public_bundles(file: Path) -> list[dict]:
     return bundles
 
 
-def verify_file(file: Path, sha: str) -> None:
+def verify_file(file: Path, sha: str, *, attestations_read_token: str | None = None) -> None:
     if not SHA_RE.fullmatch(sha) or not file.is_file() or file.is_symlink():
         raise ValueError("Invalid release artifact")
     ensure_gh()
-    bundles = public_bundles(file)
+    bundles = public_bundles(file, attestations_read_token=attestations_read_token)
     with tempfile.TemporaryDirectory(prefix="xmesh-attestation-") as tmp:
         path = Path(tmp) / "bundles.jsonl"
         path.write_text("".join(json.dumps(x, separators=(",", ":")) + "\n" for x in bundles))
@@ -132,7 +145,7 @@ def verify_file(file: Path, sha: str) -> None:
         ], check=True, timeout=90, stdout=subprocess.DEVNULL,
            stderr=subprocess.DEVNULL)
 
-def stage_revision(sha: str, directory: Path) -> dict[str, Path]:
+def stage_revision(sha: str, directory: Path, *, attestations_read_token: str | None = None) -> dict[str, Path]:
     if not SHA_RE.fullmatch(sha) or not directory.is_dir() or directory.is_symlink():
         raise ValueError("Invalid release staging")
     result = {}
@@ -145,7 +158,7 @@ def stage_revision(sha: str, directory: Path) -> dict[str, Path]:
         if file.exists() or file.is_symlink():
             raise ValueError("Refusing existing release staging target")
         file.write_bytes(data)
-        verify_file(file, sha)
+        verify_file(file, sha, attestations_read_token=attestations_read_token)
         result[name] = file
     version = result["VERSION"].read_text("ascii").strip()
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
