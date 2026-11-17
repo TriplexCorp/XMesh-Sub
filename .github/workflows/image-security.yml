@@ -5,6 +5,7 @@ on:
       - 'install.sh'
       - 'tests/test-install.sh'
       - 'tests/test-runtime-edge.sh'
+      - 'tests/test-image-rollback.py'
       - '.github/workflows/image-security.yml'
       - '.github/workflows/ci.yml'
       - '.github/workflows/attested-release.yml'
@@ -86,6 +87,9 @@ jobs:
       - name: Exercise real Caddy and Unix limiter against spoofed client headers
         shell: bash
         run: bash tests/test-runtime-edge.sh "$RUNNER_TEMP"
+      - name: Recover exact old Docker image IDs after simulated broken upgrade
+        shell: bash
+        run: python3 tests/test-image-rollback.py
       - name: Install pinned and checksum-verified Trivy v0.76.2
         env:
           TRIVY_ARCH: ${{ matrix.arch }}
