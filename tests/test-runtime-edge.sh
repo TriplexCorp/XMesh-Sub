@@ -5,6 +5,8 @@ set -Eeuo pipefail
 cd "$(dirname "$0")/.."
 [[ $# == 1 && -s "$1/Caddyfile" ]] || { echo 'Missing generated Caddyfile' >&2; exit 1; }
 source_caddyfile=$1/Caddyfile
+caddy_image=${XMESH_SUB_CADDY_IMAGE:-xmesh-sub-caddy:2.11.9-josev4r1}
+limiter_image=${XMESH_SUB_LIMITER_IMAGE:-xmesh-sub-limiter:3.12.16-krb5r1}
 temp=$(mktemp -d)
 # Disposable non-secret fixtures must be traversable by container uid 65534.
 # The socket itself remains under a uid-65534 owned, mode-0770 subdirectory.
@@ -25,7 +27,7 @@ mkdir -p "$temp/policy"
 docker volume create "$socket_volume" >/dev/null
 docker run --rm --user 0 --entrypoint sh \
   -v "$socket_volume:/run/xmesh-sub" \
-  xmesh-sub-caddy:2.11.9-josev4r1 \
+  "$caddy_image" \
   -c 'chown 65534:65534 /run/xmesh-sub && chmod 0770 /run/xmesh-sub'
 printf '%s\n' '{"enabled":true,"mode":"protect","ipPerMinute":1}' > "$temp/policy/config.json"
 chmod 0644 "$temp/policy/config.json"
@@ -58,7 +60,7 @@ docker run -d --name "$limiter_name" --network none \
   -v "$socket_volume:/run/xmesh-sub" \
   -v "$temp/policy:/etc/xmesh-sub/policy:ro" \
   -v "$PWD/limiter.py:/opt/limiter.py:ro" \
-  xmesh-sub-limiter:3.12.16-krb5r1 python3 -I /opt/limiter.py >/dev/null
+  "$limiter_image" python3 -I /opt/limiter.py >/dev/null
 for ((attempt=0; attempt<60; attempt++)); do
   docker exec "$limiter_name" test -S /run/xmesh-sub/rate.sock >/dev/null 2>&1 && break
   sleep 0.2
@@ -80,7 +82,7 @@ docker run -d --name "$caddy_name" --network bridge \
   -p '127.0.0.1::8080' \
   -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" \
   -v "$socket_volume:/run/xmesh-sub:ro" \
-  xmesh-sub-caddy:2.11.9-josev4r1 caddy run --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
+  "$caddy_image" caddy run --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
 
 address=$(docker port "$caddy_name" 8080/tcp | head -n 1)
 [[ "$address" =~ ^127[.]0[.]0[.]1:[0-9]+$ ]] || { echo 'Unexpected local-only Caddy binding' >&2; exit 1; }
