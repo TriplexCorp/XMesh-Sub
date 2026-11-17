@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 from urllib.parse import urlparse
 from pathlib import Path
@@ -143,7 +144,10 @@ def verify_file(file: Path, sha: str, *, attestations_read_token: str | None = N
             "--source-digest", sha,
             "--deny-self-hosted-runners",
         ], check=True, timeout=90, stdout=subprocess.DEVNULL,
-           stderr=subprocess.DEVNULL)
+           stderr=subprocess.DEVNULL,
+           # Even the optional CI GET token must not reach the gh process.
+           env={key: value for key, value in os.environ.items()
+                if key not in ("GH_TOKEN", "GITHUB_TOKEN", "XMESH_ATTESTATION_INDEX_TOKEN")})
 
 def stage_revision(sha: str, directory: Path, *, attestations_read_token: str | None = None) -> dict[str, Path]:
     if not SHA_RE.fullmatch(sha) or not directory.is_dir() or directory.is_symlink():
