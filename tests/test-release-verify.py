@@ -51,6 +51,67 @@ class ReleaseVerifyTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     release.public_bundles(file)
 
+    def test_ci_token_is_restricted_to_attestation_index_get(self):
+        index = ("https://api.github.com/repos/" + release.REPO
+                 + "/attestations/sha256:" + "a" * 64)
+        with patch.object(release.urllib.request, "build_opener") as make_opener:
+            reply = make_opener.return_value.open.return_value.__enter__.return_value
+            reply.read.return_value = b'{"attestations":[]}'
+            self.assertEqual(
+                release.fetch_bytes(index, 1024,
+                                    attestations_read_token="ghs_test-safe_123"),
+                b'{"attestations":[]}')
+            req = make_opener.return_value.open.call_args.args[0]
+            self.assertEqual(req.full_url, index)
+            self.assertEqual(req.get_header("Authorization"),
+                             "Bearer ghs_test-safe_123")
+            make_opener.return_value.open.reset_mock()
+            release.fetch_bytes(index, 1024)
+            unauthenticated = make_opener.return_value.open.call_args.args[0]
+            self.assertIsNone(unauthenticated.get_header("Authorization"))
+            for url in (
+                "https://raw.githubusercontent.com/" + release.REPO + "/main/VERSION",
+                "https://api.github.com/repos/" + release.REPO + "/commits/main",
+                "http://api.github.com/repos/" + release.REPO + "/attestations/sha256:" + "a" * 64,
+            ):
+                with self.assertRaises(ValueError):
+                    release.fetch_bytes(url, 1024,
+                                        attestations_read_token="ghs_test-safe_123")
+            self.assertEqual(make_opener.return_value.open.call_count, 1)
+            for invalid in ("token with spaces", "bad\r\nInjected: true", ""):
+                with self.assertRaises(ValueError):
+                    release.fetch_bytes(index, 1024,
+                                        attestations_read_token=invalid)
+
+    def test_optional_api_token_never_reaches_offline_verifier(self):
+        sha = "f" * 40
+        with tempfile.TemporaryDirectory() as d:
+            file = Path(d) / "install.sh"
+            file.write_text("release")
+            with patch.object(release, "ensure_gh"), patch.object(
+                release, "public_bundles",
+                return_value=[{"verificationMaterial": {}, "dsseEnvelope": {}}]
+            ) as bundles, patch.object(release.subprocess, "run") as runner, patch.dict(
+                release.os.environ,
+                {"XMESH_ATTESTATION_INDEX_TOKEN": "ghs_test-safe_123",
+                 "GH_TOKEN": "fake-gh", "GITHUB_TOKEN": "fake-github"},
+            ):
+                release.verify_file(
+                    file, sha, attestations_read_token="ghs_test-safe_123")
+                bundles.assert_called_once_with(
+                    file, attestations_read_token="ghs_test-safe_123")
+                args = runner.call_args.args[0]
+                self.assertIn("--bundle", args)
+                self.assertEqual(args[args.index("--source-digest") + 1], sha)
+                self.assertEqual(args[args.index("--cert-identity") + 1],
+                                 release.CERT_IDENTITY)
+                self.assertEqual(args[args.index("--source-ref") + 1],
+                                 release.SOURCE_REF)
+                self.assertNotIn("XMESH_ATTESTATION_INDEX_TOKEN",
+                                 runner.call_args.kwargs["env"])
+                self.assertNotIn("GH_TOKEN", runner.call_args.kwargs["env"])
+                self.assertNotIn("GITHUB_TOKEN", runner.call_args.kwargs["env"])
+
     def test_reject_vulnerable_cli(self):
         for raw in ('gh version 2.45.0 (Ubuntu)\n','gh version 2.101.9\n','nonsense\n'):
             with patch.object(release.subprocess,'run') as call:
