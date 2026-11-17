@@ -458,7 +458,44 @@ if [[ ! -e "$ROOT/edge-policy/config.json" ]]; then
   chmod 644 "$ROOT/edge-policy/config.json"
 fi
 temp=$(mktemp -d "$ROOT/.install.XXXXXXXX")
-trap 'rm -rf "$temp"' EXIT
+existing_install=0
+install_mutated=0
+# The first updater may be a PRE-remediation manager, which does not know how
+# to save images/configuration. The signed INSTALLER must protect that upgrade.
+# Rollback data contains private keys: the entire staging directory is 0700.
+installer_exit() {
+  local status=$1 name
+  trap - EXIT
+  if ((status != 0 && existing_install == 1 && install_mutated == 1)); then
+    printf 'XMesh Sub: update failed; restoring previous gateway deployment\n' >&2
+    set +e
+    for name in Caddyfile compose.yaml Dockerfile.limiter Dockerfile.caddy limiter.py manager.py release_verify.py RELEASE_SHA VERSION agent-key.pem manager.json; do
+      if [[ -f "$temp/previous/$name" ]]; then
+        cp -p -- "$temp/previous/$name" "$ROOT/$name" ||
+          printf 'XMesh Sub: rollback ERROR restoring %s\n' "$name" >&2
+      elif [[ -f "$temp/previous/.absent-$name" ]]; then
+        rm -f -- "$ROOT/$name" ||
+          printf 'XMesh Sub: rollback ERROR removing %s\n' "$name" >&2
+      fi
+    done
+    if [[ -f "$temp/previous/xmesh-sub-manager.service" ]]; then
+      cp -p -- "$temp/previous/xmesh-sub-manager.service" /etc/systemd/system/xmesh-sub-manager.service
+    elif [[ -f "$temp/previous/.absent-xmesh-sub-manager.service" ]]; then
+      rm -f /etc/systemd/system/xmesh-sub-manager.service
+    fi
+    systemctl daemon-reload
+    if ! (cd "$ROOT" && docker compose up -d --no-build --force-recreate --remove-orphans); then
+      printf 'XMesh Sub: CRITICAL: automatic gateway rollback failed; inspect the original Compose deployment\n' >&2
+    fi
+    if ((SKIP_MANAGER_RESTART == 0)) && [[ -f /etc/systemd/system/xmesh-sub-manager.service ]]; then
+      systemctl restart xmesh-sub-manager.service ||
+        printf 'XMesh Sub: rollback WARN: manager service could not restart\n' >&2
+    fi
+  fi
+  rm -rf -- "$temp"
+  exit "$status"
+}
+trap 'installer_exit "$?"' EXIT
 render_caddyfile >"$temp/Caddyfile"
 render_compose >"$temp/compose.yaml"
 render_limiter >"$temp/limiter.py"
@@ -576,6 +613,42 @@ if ! docker image inspect "$caddy_image" >/dev/null 2>&1; then
 fi
 docker run --rm -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" "$caddy_image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ||
   die "Gateway configuration invalid, existing deployment unchanged"
+# Capture ALL existing configuration before touching live files. In
+# particular, the old manager cannot be relied upon to perform this backup.
+# Old images are preserved by revision-specific tags; verify they still exist.
+if [[ -f "$ROOT/compose.yaml" ]]; then
+  previous_images=$(docker compose -f "$ROOT/compose.yaml" config --images) ||
+    die "Could not inspect old Compose image references; leaving deployment unchanged"
+  [[ -n "$previous_images" ]] ||
+    die "Old Compose has no restorable image references"
+  image_count=0
+  while IFS= read -r old_ref; do
+    [[ -n "$old_ref" && "$old_ref" != *[[:space:]]* ]] ||
+      die "Invalid old image reference; leaving deployment unchanged"
+    docker image inspect "$old_ref" >/dev/null 2>&1 ||
+      die "Old gateway image is missing; refusing unsafe first upgrade"
+    ((image_count+=1))
+    ((image_count<=6)) || die "Unexpected original gateway image inventory"
+  done <<< "$previous_images"
+  mkdir -m 700 "$temp/previous"
+  for name in Caddyfile compose.yaml Dockerfile.limiter Dockerfile.caddy limiter.py manager.py release_verify.py RELEASE_SHA VERSION agent-key.pem manager.json; do
+    if [[ -f "$ROOT/$name" ]]; then
+      cp -p -- "$ROOT/$name" "$temp/previous/$name" ||
+        die "Unable to snapshot old gateway file"
+    else
+      : > "$temp/previous/.absent-$name"
+    fi
+  done
+  if [[ -f /etc/systemd/system/xmesh-sub-manager.service ]]; then
+    cp -p /etc/systemd/system/xmesh-sub-manager.service "$temp/previous/xmesh-sub-manager.service"
+  else
+    : > "$temp/previous/.absent-xmesh-sub-manager.service"
+  fi
+  existing_install=1
+fi
+# From this point onward, failure restores both the old files and the old
+# Docker containers. This also covers upgrades launched by OLD managers.
+install_mutated=1
 [[ ! -f "$ROOT/Caddyfile" ]] || cp -p "$ROOT/Caddyfile" "$ROOT/Caddyfile.previous"
 install -m 600 "$temp/Caddyfile" "$ROOT/Caddyfile"
 install -m 600 "$temp/compose.yaml" "$ROOT/compose.yaml"
@@ -583,7 +656,8 @@ install -m 644 "$temp/Dockerfile.limiter" "$ROOT/Dockerfile.limiter"
 install -m 644 "$temp/Dockerfile.caddy" "$ROOT/Dockerfile.caddy"
 install -m 644 "$temp/limiter.py" "$ROOT/limiter.py"
 cd "$ROOT"
-docker compose pull --ignore-buildable
+# Both images were built locally from the verified installer. Do not pull
+# arbitrary remote tags before activating this attested revision.
 docker compose up -d --no-build --remove-orphans
 if [[ -n "$ENROLL_TOKEN" ]]; then
   # Fresh Ed25519 identity is generated on the Sub VPS. Only the public
