@@ -6,6 +6,7 @@ network services, or production data. Requires locally built candidate images.
 """
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -41,9 +42,9 @@ def main():
         root = Path(directory)
         compose = root / "compose.yaml"
         try:
-            docker("image", "tag", "xmesh-sub-caddy:2.11.9-josev4r1", original_caddy)
+            docker("image", "tag", os.environ.get("XMESH_SUB_CADDY_IMAGE", "xmesh-sub-caddy:2.11.9-josev4r1"), original_caddy)
             created.append(original_caddy)
-            docker("image", "tag", "xmesh-sub-limiter:3.12.16-krb5r1", original_limiter)
+            docker("image", "tag", os.environ.get("XMESH_SUB_LIMITER_IMAGE", "xmesh-sub-limiter:3.12.16-krb5r1"), original_limiter)
             created.append(original_limiter)
             caddy_image = docker("image", "inspect", "--format", "{{.Id}}", original_caddy)
             limiter_image = docker("image", "inspect", "--format", "{{.Id}}", original_limiter)
