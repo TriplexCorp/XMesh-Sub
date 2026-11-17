@@ -137,11 +137,24 @@ FROM caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20f
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 DOCKER
 }
+# Every attested revision has immutable local image names. In particular,
+# the FIRST upgrade from an old manager must never overwrite the Docker tags
+# required to recover the previous running configuration.
+image_release_tag() {
+  local sha=${RELEASE_SHA:-0000000000000000000000000000000000000000}
+  [[ "$sha" =~ ^[a-f0-9]{40}$ ]] || die "Invalid immutable image release revision"
+  printf 'rev-%s' "$sha"
+}
+sub_limiter_image() { printf 'xmesh-sub-limiter:%s' "$(image_release_tag)"; }
+sub_caddy_image() { printf 'xmesh-sub-caddy:%s' "$(image_release_tag)"; }
 render_compose() {
-  cat <<'YAML'
+  local limiter_image caddy_image
+  limiter_image=$(sub_limiter_image)
+  caddy_image=$(sub_caddy_image)
+  cat <<'YAML' | sed -e "s|@LIMITER_IMAGE@|$limiter_image|g" -e "s|@CADDY_IMAGE@|$caddy_image|g"
 services:
   xmesh-sub-limiter:
-    image: xmesh-sub-limiter:3.12.16-krb5r1
+    image: @LIMITER_IMAGE@
     build:
       context: .
       dockerfile: Dockerfile.limiter
@@ -161,7 +174,7 @@ services:
       - /tmp
     # No published ports: Caddy is the only client, via a shared Unix socket.
   xmesh-sub:
-    image: xmesh-sub-caddy:2.11.9-josev4r1
+    image: @CADDY_IMAGE@
     build:
       context: .
       dockerfile: Dockerfile.caddy
@@ -546,13 +559,22 @@ PY
 # The build context contains no keys, account records or verified manager code.
 mkdir -p "$temp/image-build"
 cp "$temp/Dockerfile.limiter" "$temp/image-build/Dockerfile"
-docker build --pull -t xmesh-sub-limiter:3.12.16-krb5r1 "$temp/image-build" ||
-  die "Could not build patched limiter image; existing deployment unchanged"
+limiter_image=$(sub_limiter_image)
+caddy_image=$(sub_caddy_image)
+# A signed source revision owns its image names. Never rebuild an already
+# installed revision under the same tag: a repeat installation should not
+# silently replace the original image ID with a newer Alpine package set.
+if ! docker image inspect "$limiter_image" >/dev/null 2>&1; then
+  docker build --pull -t "$limiter_image" "$temp/image-build" ||
+    die "Could not build patched limiter image; existing deployment unchanged"
+fi
 mkdir -p "$temp/caddy-build"
 cp "$temp/Dockerfile.caddy" "$temp/caddy-build/Dockerfile"
-docker build --pull -t xmesh-sub-caddy:2.11.9-josev4r1 "$temp/caddy-build" ||
-  die "Could not build patched Caddy binary; existing deployment unchanged"
-docker run --rm -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" xmesh-sub-caddy:2.11.9-josev4r1 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ||
+if ! docker image inspect "$caddy_image" >/dev/null 2>&1; then
+  docker build --pull -t "$caddy_image" "$temp/caddy-build" ||
+    die "Could not build patched Caddy binary; existing deployment unchanged"
+fi
+docker run --rm -v "$temp/Caddyfile:/etc/caddy/Caddyfile:ro" "$caddy_image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile ||
   die "Gateway configuration invalid, existing deployment unchanged"
 [[ ! -f "$ROOT/Caddyfile" ]] || cp -p "$ROOT/Caddyfile" "$ROOT/Caddyfile.previous"
 install -m 600 "$temp/Caddyfile" "$ROOT/Caddyfile"
